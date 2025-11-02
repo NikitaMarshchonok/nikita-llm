@@ -90,9 +90,37 @@ python evaluation/generate.py \
 ## 5. Current training run (local, CPU)
 
 device: cpu
+
 steps: ≈ 2000 (config was 10000, but early checkpoint is enough)
-time: ~1 hour on MacBook Pro (M2)
+
+time: ~1 hour on MacBook Pro (M2Pro)
+
 best checkpoint: checkpoints/checkpoint-best.pt
+
 validation loss: ≈ 0.08
+
 perplexity: ≈ 1.09
+
 trainer warning: “Perplexity < 1.1 → overfitting”
+
+
+
+## 6. Why overfitting happened
+
+small dataset
+
+small model that learns fast
+
+long training (2000+ steps)
+
+same domain text
+
+How to fix:
+
+add more data (data/raw/)
+
+increase dropout in llm.config.js from 0.2 → 0.3
+
+reduce training.max_steps (e.g. 3000 instead of 10000)
+
+
