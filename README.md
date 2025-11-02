@@ -41,3 +41,29 @@ This repo contains a **fully working pipeline** for training a small GPT-like mo
 ├── logs/             # training logs (ignored in git)
 ├── llm.config.js     # main config (model + training)
 └── README.md
+```
+
+
+
+## 4. How to run
+
+1. Clone / open project
+```
+git clone https://github.com/NikitaMarshchonok/nikita-llm.git
+cd nikita-llm
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+2. Add data
+  ```
+mkdir -p data/raw
+curl https://www.gutenberg.org/files/100/100-0.txt > data/raw/shakespeare.txt
+```  
+
+
+3. Train tokenizer
+```
+
+```
