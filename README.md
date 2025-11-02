@@ -65,5 +65,34 @@ curl https://www.gutenberg.org/files/100/100-0.txt > data/raw/shakespeare.txt
 
 3. Train tokenizer
 ```
-
+python tokenizer/train.py --data data/raw/
 ```
+
+
+4. Prepare dataset
+```
+python data/prepare.py
+```
+
+5. Train model
+```
+python training/train.py
+```
+
+6. Generate text from checkpoint
+```
+python evaluation/generate.py \
+  --checkpoint checkpoints/checkpoint-best.pt \
+  --prompt "Hello, I am Nikita and I am building my own LLM"
+```
+
+
+## 5. Current training run (local, CPU)
+
+device: cpu
+steps: ≈ 2000 (config was 10000, but early checkpoint is enough)
+time: ~1 hour on MacBook Pro (M2)
+best checkpoint: checkpoints/checkpoint-best.pt
+validation loss: ≈ 0.08
+perplexity: ≈ 1.09
+trainer warning: “Perplexity < 1.1 → overfitting”
