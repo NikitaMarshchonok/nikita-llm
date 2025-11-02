@@ -1,18 +1,43 @@
 # nikita-llm
 
-This is a scaffolded LLM training project created with `@theanikrtgiri/create-llm`.
+Custom LLM training project scaffolded with [`@theanikrtgiri/create-llm`].
 
-## How to run
+This repo contains a **fully working pipeline** for training a small GPT-like model on local machine (macOS, CPU). The goal of the project is to learn how to **create, train and serve** your own LLM, and then wrap it into an AI agent (for example, a “data scientist agent”).
 
-```bash
-python tokenizer/train.py --data data/raw/
-python data/prepare.py
-python training/train.py
+---
 
-Environment
+## 1. Project goals
 
-Python 3.12
+- ✅ scaffold LLM project locally (no cloud required)
+- ✅ train tokenizer on **own** data
+- ✅ prepare dataset and run training loop
+- ✅ save checkpoints and best model
+- ✅ run text generation / chat on the trained model
+- 🛠 next: wrap model into API (FastAPI) and build agent on top
 
-PyTorch 2.x
+---
 
-macOS / Apple Silicon
+## 2. Tech stack
+
+- **Python** 3.12
+- **PyTorch** 2.x
+- **Transformers**
+- **Gradio** (for chat UI)
+- **create-llm** CLI (project bootstrap)
+- OS: **macOS / Apple Silicon (M2)**
+
+---
+
+## 3. Project structure
+
+```text
+.
+├── data/             # raw and processed data
+├── tokenizer/        # tokenizer training script + tokenizer.json
+├── training/         # main training loop, callbacks, dashboard
+├── evaluation/       # generation and evaluation scripts
+├── models/           # model architectures (nano, tiny, small, base)
+├── checkpoints/      # saved models (ignored in git)
+├── logs/             # training logs (ignored in git)
+├── llm.config.js     # main config (model + training)
+└── README.md
