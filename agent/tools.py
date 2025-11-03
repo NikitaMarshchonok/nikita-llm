@@ -1,115 +1,124 @@
 # agent/tools.py
 
-from io import BytesIO
+from __future__ import annotations
+
 from typing import Optional, Dict, Any
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
     mean_squared_error,
 )
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.impute import SimpleImputer
 
 
-# ------------- ЗАГРУЗКА ДАННЫХ ------------- #
-
-def load_csv_from_bytes(file_bytes: bytes) -> pd.DataFrame:
-    """Чтение CSV из загруженного файла (для веба)."""
-    return pd.read_csv(BytesIO(file_bytes))
-
-
-def load_csv_from_path(path: str) -> pd.DataFrame:
-    """Чтение CSV с диска (для локальных тестов)."""
-    return pd.read_csv(path)
-
-
-# ------------- БАЗОВЫЙ EDA ------------- #
-
+# ---------- 1. EDA ----------
 def basic_eda(df: pd.DataFrame) -> Dict[str, Any]:
-    """Простая разведочная аналитика, чтобы показать пользователю."""
     return {
-        "shape": df.shape,
-        "dtypes": df.dtypes.astype(str).to_dict(),
-        "nulls": df.isna().sum().to_dict(),
-        "head": df.head(5).to_dict(orient="records"),
+        "shape": list(df.shape),
+        "dtypes": {c: str(t) for c, t in df.dtypes.items()},
+        "nulls": {c: int(df[c].isna().sum()) for c in df.columns},
     }
 
 
-# ------------- ОПРЕДЕЛЕНИЕ ЗАДАЧИ ------------- #
-
+# ---------- 2. определение задачи ----------
 def detect_task(df: pd.DataFrame, target: Optional[str] = None) -> Dict[str, Any]:
     """
-    Пытается понять, что за задача:
-    - если target указан → классификация или регрессия по нему
-    - если нет → ищет колонку с небольшим числом уникальных значений и делает классификацию
-    иначе отдаёт режим "просто EDA"
+    Если target передали и он есть в колонках — определяем тип задачи.
+    Если не передали — просто EDA.
     """
-    # если пользователь сказал таргет — работаем с ним
-    if target and target in df.columns:
-        y = df[target]
-        if y.nunique() <= 20:
-            return {"task": "classification", "target": target}
+    if target is not None and target in df.columns:
+        if pd.api.types.is_numeric_dtype(df[target]):
+            task = "regression"
         else:
-            return {"task": "regression", "target": target}
+            task = "classification"
+        return {"task": task, "target": target}
 
-    # автоопределение
-    for col in df.columns:
-        nunique = df[col].nunique()
-        # простое правило: немного уникальных → скорее класс
-        if 2 <= nunique <= 20:
-            return {"task": "classification", "target": col}
-
-    # не нашли нормальный таргет
     return {"task": "eda", "target": None}
 
 
-# ------------- ОБУЧЕНИЕ БЕЙЗЛАЙНА ------------- #
-
+# ---------- 3. обучение базовой модели ----------
 def train_baseline(df: pd.DataFrame, target: str, task: str) -> Dict[str, Any]:
     """
-    Обучает простую модель (RandomForest) и возвращает метрики.
-    ВАЖНО: перед обучением кодируем ВСЕ нечисловые колонки через get_dummies,
-    чтобы не падать на строках и датах.
+    Простой табличный пайплайн с заполнением пропусков.
     """
-    # отделяем фичи/таргет
+    # 1) выбрасываем строки, где нет таргета
+    df = df.dropna(subset=[target])
+
     X = df.drop(columns=[target])
     y = df[target]
 
-    # one-hot для всех категорий/строк
-    # drop_first=True слегка уменьшает размерность
-    X_encoded = pd.get_dummies(X, drop_first=True)
-
-    # сплит
+    # 2) train/test
     X_train, X_test, y_train, y_test = train_test_split(
-        X_encoded, y, test_size=0.2, random_state=42
+        X, y, test_size=0.2, random_state=42
     )
 
+    # 3) какие колонки числовые, какие категориальные
+    numeric_features = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
+    cat_features = [c for c in X.columns if c not in numeric_features]
+
+    # 4) трансформеры с имьютерами
+    numeric_transformer = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="median")),
+        ]
+    )
+
+    categorical_transformer = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore")),
+        ]
+    )
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", numeric_transformer, numeric_features),
+            ("cat", categorical_transformer, cat_features),
+        ]
+    )
+
+    # 5) модель
     if task == "classification":
         model = RandomForestClassifier(n_estimators=200, random_state=42)
-        model.fit(X_train, y_train)
-        preds = model.predict(X_test)
+    else:
+        model = RandomForestRegressor(n_estimators=200, random_state=42)
+
+    pipe = Pipeline(
+        steps=[
+            ("prep", preprocessor),
+            ("model", model),
+        ]
+    )
+
+    # 6) учим
+    pipe.fit(X_train, y_train)
+    preds = pipe.predict(X_test)
+
+    # 7) метрики
+    if task == "classification":
         acc = accuracy_score(y_test, preds)
         f1 = f1_score(y_test, preds, average="macro")
         return {
             "model_type": "RandomForestClassifier",
-            "accuracy": acc,
-            "f1": f1,
-            "n_train": len(X_train),
-            "n_test": len(X_test),
-            "n_features": X_encoded.shape[1],
+            "accuracy": float(acc),
+            "f1": float(f1),
         }
-
     else:
-        model = RandomForestRegressor(n_estimators=200, random_state=42)
-        model.fit(X_train, y_train)
-        preds = model.predict(X_test)
-        rmse = mean_squared_error(y_test, preds, squared=False)
+        # пытаемся посчитать rmse “правильно”, а если sklearn старый — руками
+        try:
+            rmse = mean_squared_error(y_test, preds, squared=False)
+        except TypeError:
+            mse = mean_squared_error(y_test, preds)
+            rmse = mse ** 0.5
+
         return {
             "model_type": "RandomForestRegressor",
-            "rmse": rmse,
-            "n_train": len(X_train),
-            "n_test": len(X_test),
-            "n_features": X_encoded.shape[1],
+            "rmse": float(rmse),
         }

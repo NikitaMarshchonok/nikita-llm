@@ -16,23 +16,37 @@ app = FastAPI(title="Nikita DS Agent")
 
 def read_csv_safely(file_bytes: bytes) -> pd.DataFrame:
     """
-    Пробуем прочитать CSV разными способами.
+    Читаем CSV максимально терпеливо.
+    Пробуем разные разделители и кодировки.
     """
     bio = BytesIO(file_bytes)
 
-    # 1) обычный csv с запятой
-    try:
-        bio.seek(0)
-        return pd.read_csv(bio)
-    except Exception:
-        pass
+    variants = [
+        {},  # стандарт: utf-8, ','
+        {"sep": ";"},
+        {"encoding": "utf-8-sig"},
+        {"encoding": "windows-1251"},
+        {"sep": ";", "encoding": "windows-1251"},
+        {"encoding": "latin-1"},          # <-- добавили
+        {"sep": ";", "encoding": "latin-1"},  # <-- добавили
+    ]
 
-    # 2) csv с ; (часто в русских выгрузках)
-    try:
-        bio.seek(0)
-        return pd.read_csv(bio, sep=";")
-    except Exception:
-        pass
+    for kwargs in variants:
+        try:
+            bio.seek(0)
+            return pd.read_csv(bio, on_bad_lines="skip", **kwargs)
+        except Exception:
+            continue
+
+    # крайний вариант: читаем, игнорируя битые символы
+    bio.seek(0)
+    return pd.read_csv(
+        bio,
+        on_bad_lines="skip",
+        encoding="latin-1",
+        errors="ignore",
+    )
+
 
     # 3) если всё равно не получилось — пусть pandas кинет нормальную ошибку
     bio.seek(0)
