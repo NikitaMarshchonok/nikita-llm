@@ -1,4 +1,8 @@
 # agent/tools.py
+
+from io import BytesIO
+from typing import Optional, Dict, Any
+
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
@@ -9,10 +13,10 @@ from sklearn.metrics import (
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 
+# ------------- ЗАГРУЗКА ДАННЫХ ------------- #
+
 def load_csv_from_bytes(file_bytes: bytes) -> pd.DataFrame:
     """Чтение CSV из загруженного файла (для веба)."""
-    from io import BytesIO
-
     return pd.read_csv(BytesIO(file_bytes))
 
 
@@ -21,7 +25,10 @@ def load_csv_from_path(path: str) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def basic_eda(df: pd.DataFrame) -> dict:
+# ------------- БАЗОВЫЙ EDA ------------- #
+
+def basic_eda(df: pd.DataFrame) -> Dict[str, Any]:
+    """Простая разведочная аналитика, чтобы показать пользователю."""
     return {
         "shape": df.shape,
         "dtypes": df.dtypes.astype(str).to_dict(),
@@ -30,8 +37,16 @@ def basic_eda(df: pd.DataFrame) -> dict:
     }
 
 
-def detect_task(df: pd.DataFrame, target: str | None = None) -> dict:
-    # если пользователь сказал, какая колонка таргет
+# ------------- ОПРЕДЕЛЕНИЕ ЗАДАЧИ ------------- #
+
+def detect_task(df: pd.DataFrame, target: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Пытается понять, что за задача:
+    - если target указан → классификация или регрессия по нему
+    - если нет → ищет колонку с небольшим числом уникальных значений и делает классификацию
+    иначе отдаёт режим "просто EDA"
+    """
+    # если пользователь сказал таргет — работаем с ним
     if target and target in df.columns:
         y = df[target]
         if y.nunique() <= 20:
@@ -39,21 +54,36 @@ def detect_task(df: pd.DataFrame, target: str | None = None) -> dict:
         else:
             return {"task": "regression", "target": target}
 
-    # попробовать угадать
+    # автоопределение
     for col in df.columns:
         nunique = df[col].nunique()
+        # простое правило: немного уникальных → скорее класс
         if 2 <= nunique <= 20:
             return {"task": "classification", "target": col}
 
+    # не нашли нормальный таргет
     return {"task": "eda", "target": None}
 
 
-def train_baseline(df: pd.DataFrame, target: str, task: str) -> dict:
+# ------------- ОБУЧЕНИЕ БЕЙЗЛАЙНА ------------- #
+
+def train_baseline(df: pd.DataFrame, target: str, task: str) -> Dict[str, Any]:
+    """
+    Обучает простую модель (RandomForest) и возвращает метрики.
+    ВАЖНО: перед обучением кодируем ВСЕ нечисловые колонки через get_dummies,
+    чтобы не падать на строках и датах.
+    """
+    # отделяем фичи/таргет
     X = df.drop(columns=[target])
     y = df[target]
 
+    # one-hot для всех категорий/строк
+    # drop_first=True слегка уменьшает размерность
+    X_encoded = pd.get_dummies(X, drop_first=True)
+
+    # сплит
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
+        X_encoded, y, test_size=0.2, random_state=42
     )
 
     if task == "classification":
@@ -68,7 +98,9 @@ def train_baseline(df: pd.DataFrame, target: str, task: str) -> dict:
             "f1": f1,
             "n_train": len(X_train),
             "n_test": len(X_test),
+            "n_features": X_encoded.shape[1],
         }
+
     else:
         model = RandomForestRegressor(n_estimators=200, random_state=42)
         model.fit(X_train, y_train)
@@ -79,4 +111,5 @@ def train_baseline(df: pd.DataFrame, target: str, task: str) -> dict:
             "rmse": rmse,
             "n_train": len(X_train),
             "n_test": len(X_test),
+            "n_features": X_encoded.shape[1],
         }
