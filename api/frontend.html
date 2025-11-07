@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Nikita DS Agent UI</title>
+    <style>
+      body { font-family: sans-serif; max-width: 900px; margin: 20px auto; }
+      img { max-width: 250px; margin: 5px; border: 1px solid #ccc; }
+      pre { background: #f7f7f7; padding: 10px; }
+    </style>
+  </head>
+  <body>
+    <h1>Nikita DS Agent</h1>
+    <p>Загрузи CSV → получи EDA, модель и графики</p>
+
+    <input type="file" id="fileInput" />
+    <input type="text" id="targetInput" placeholder="target (необязательно)" />
+    <button onclick="upload()">Отправить</button>
+
+    <h2>Ответ</h2>
+    <pre id="report"></pre>
+    <div id="plots"></div>
+
+    <script>
+      async function upload() {
+        const f = document.getElementById("fileInput").files[0];
+        if (!f) { alert("Выбери файл"); return; }
+        const target = document.getElementById("targetInput").value || "";
+
+        const fd = new FormData();
+        fd.append("file", f);
+        fd.append("target", target);
+
+        const resp = await fetch("http://127.0.0.1:8000/upload", {
+          method: "POST",
+          body: fd,
+        });
+
+        const data = await resp.json();
+        document.getElementById("report").textContent = JSON.stringify(data, null, 2);
+
+        const plotsDiv = document.getElementById("plots");
+        plotsDiv.innerHTML = "";
+        if (data.plots) {
+          data.plots.forEach(p => {
+            const img = document.createElement("img");
+            img.src = "data:image/png;base64," + p.image_base64;
+            img.alt = p.name;
+            plotsDiv.appendChild(img);
+          });
+        }
+      }
+    </script>
+  </body>
+</html>
