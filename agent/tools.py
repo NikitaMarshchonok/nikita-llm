@@ -148,37 +148,47 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
 # ---------------------------------------------------------------------
 # 4. обучение базовой модели
 # ---------------------------------------------------------------------
-def train_baseline(df: pd.DataFrame, target: str, task: str):
+def train_baseline(df: pd.DataFrame, target: str, task: str) -> Optional[dict]:
+    """
+    Обучаем очень базовую модель поверх авто-препроцессинга.
+    Возвращаем метрики и тип модели.
+    """
     if target not in df.columns:
-        return None, None
+        return None
 
+    # попробуем привести строковые числа
     df = _coerce_numeric(df)
 
     y = df[target]
     X = df.drop(columns=[target])
 
     if X.shape[1] == 0:
-        return None, None
+        return None
 
     preprocessor = build_preprocessor(X)
 
     if task == "classification":
-        # важно: проверим, что классов >= 2
-        if y.nunique() < 2:
-            raise ValueError("Классов меньше двух, обучать классификацию нельзя")
-
         model = RandomForestClassifier(
             n_estimators=200,
             random_state=42,
             n_jobs=-1,
         )
-        clf = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
-        strat = y if y.nunique() < 50 else None
+
+        # проверяем, можно ли стратифицировать
+        counts = y.value_counts(dropna=False)
+        can_stratify = (counts >= 2).all()
+
         X_train, X_val, y_train, y_val = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=strat
+            X,
+            y,
+            test_size=0.2,
+            random_state=42,
+            stratify=y if (y.nunique() < 50 and can_stratify) else None,
         )
-        clf.fit(X_train, y_train)
-        preds = clf.predict(X_val)
+
+        pipe = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
+        pipe.fit(X_train, y_train)
+        preds = pipe.predict(X_val)
 
         acc = float(accuracy_score(y_val, preds))
         f1 = float(f1_score(y_val, preds, average="weighted"))
@@ -187,7 +197,7 @@ def train_baseline(df: pd.DataFrame, target: str, task: str):
             "model_type": "RandomForestClassifier",
             "accuracy": acc,
             "f1": f1,
-        }, clf
+        }
 
     elif task == "regression":
         model = RandomForestRegressor(
@@ -195,22 +205,26 @@ def train_baseline(df: pd.DataFrame, target: str, task: str):
             random_state=42,
             n_jobs=-1,
         )
-        reg = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
+
         X_train, X_val, y_train, y_val = train_test_split(
             X, y, test_size=0.2, random_state=42
         )
-        reg.fit(X_train, y_train)
-        preds = reg.predict(X_val)
 
-        rmse = float(mean_squared_error(y_val, preds, squared=False))
+        pipe = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
+        pipe.fit(X_train, y_train)
+        preds = pipe.predict(X_val)
+
+        # ---- ВАЖНО: считаем RMSE совместимо с любой версией sklearn ----
+        mse = float(mean_squared_error(y_val, preds))  # без параметров
+        rmse = mse ** 0.5
+
         return {
             "model_type": "RandomForestRegressor",
             "rmse": rmse,
-        }, reg
+        }
 
     else:
-        return None, None
-
+        return None
 
 # ---------------------------------------------------------------------
 # 5. отчёт в виде текста
