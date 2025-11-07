@@ -1,102 +1,69 @@
 # api/app.py
 
-# api/app.py
+from __future__ import annotations
 
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 import pandas as pd
 from io import BytesIO
 
-from agent.tools import basic_eda, detect_task, train_baseline
+from agent.tools import basic_eda, detect_task, train_baseline, build_report
 
-app = FastAPI(title="Nikita DS Agent")
+
+app = FastAPI(
+    title="Nikita DS Agent",
+    description="Загрузи CSV → получи EDA и базовую модель",
+    version="0.1.0",
+)
 
 
 # ---------- вспомогалки ----------
 
 def read_csv_safely(file_bytes: bytes) -> pd.DataFrame:
     """
-    Читаем CSV максимально терпеливо.
-    Пробуем разные разделители и кодировки.
+    Пытаемся прочитать CSV с разными кодировками и разделителями.
     """
     bio = BytesIO(file_bytes)
 
     variants = [
-        {},  # стандарт: utf-8, ','
+        {},  # по умолчанию: utf-8 и запятая
         {"sep": ";"},
         {"encoding": "utf-8-sig"},
-        {"encoding": "windows-1251"},
-        {"sep": ";", "encoding": "windows-1251"},
-        {"encoding": "latin-1"},          # <-- добавили
-        {"sep": ";", "encoding": "latin-1"},  # <-- добавили
+        {"encoding": "cp1251"},
+        {"sep": ";", "encoding": "cp1251"},
+        {"encoding": "latin-1"},
+        {"sep": ";", "encoding": "latin-1"},
     ]
 
     for kwargs in variants:
         try:
             bio.seek(0)
-            return pd.read_csv(bio, on_bad_lines="skip", **kwargs)
+            df = pd.read_csv(bio, on_bad_lines="skip", **kwargs)
+            if df.shape[1] > 0:
+                return df
         except Exception:
             continue
 
-    # крайний вариант: читаем, игнорируя битые символы
-    bio.seek(0)
-    return pd.read_csv(
-        bio,
-        on_bad_lines="skip",
-        encoding="latin-1",
-        errors="ignore",
-    )
+    # если вообще ничего не зашло — отдаём понятную ошибку
+    raise ValueError("Не удалось прочитать CSV ни с одной комбинацией кодировка/разделитель")
 
 
-    # 3) если всё равно не получилось — пусть pandas кинет нормальную ошибку
-    bio.seek(0)
-    return pd.read_csv(bio)
-
-
-def build_report(eda: dict, task: dict, model: dict | None) -> str:
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Собираем человекочитаемый отчёт из того, что мы насчитали.
+    Делает имена колонок удобными: без пробелов и точек.
     """
-    rows, cols = eda["shape"]
-    lines: list[str] = []
-
-    lines.append(f"📊 В датасете {rows} строк и {cols} колонок.")
-    lines.append("Типы колонок:")
-    for name, dt in eda["dtypes"].items():
-        lines.append(f"  • {name}: {dt}")
-
-    nulls = eda["nulls"]
-    has_nulls = any(v > 0 for v in nulls.values())
-    if has_nulls:
-        lines.append("Пропуски обнаружены:")
-        for name, v in nulls.items():
-            if v > 0:
-                lines.append(f"  • {name}: {v}")
-    else:
-        lines.append("Пропусков нет.")
-
-    # про задачу
-    if task["task"] == "eda":
-        lines.append("🤖 Подходящую целевую колонку не нашёл, сделал только EDA.")
-    else:
-        lines.append(
-            f'🧠 Определена задача: {task["task"]} по колонке "{task["target"]}".'
+    df = df.copy()
+    df.columns = [
+        (
+            col.strip()
+            .replace(" ", "_")
+            .replace(".", "_")
+            .replace("-", "_")
+            .replace("/", "_")
         )
-
-    # про модель
-    if model:
-        if "accuracy" in model:
-            lines.append(
-                f'📈 Базовая модель: {model["model_type"]}, accuracy={model["accuracy"]:.3f}, f1={model["f1"]:.3f}'
-            )
-        elif "rmse" in model:
-            lines.append(
-                f'📈 Базовая модель: {model["model_type"]}, RMSE={model["rmse"]:.3f}'
-            )
-    else:
-        lines.append("📦 Модель не обучалась (нечего было предсказывать).")
-
-    return "\n".join(lines)
+        for col in df.columns
+    ]
+    return df
 
 
 # ---------- эндпоинты ----------
@@ -114,22 +81,35 @@ async def upload_dataset(
     try:
         contents = await file.read()
 
-        # читаем CSV
+        # 1) читаем CSV
         df = read_csv_safely(contents)
 
-        # считаем EDA
+        # 2) нормализуем имена колонок, чтобы они совпадали с тем, что пользователь пишет в target
+        df = normalize_columns(df)
+
+        # если пользователь прислал target — тоже нормализуем так же
+        if target is not None:
+            target = (
+                target.strip()
+                .replace(" ", "_")
+                .replace(".", "_")
+                .replace("-", "_")
+                .replace("/", "_")
+            )
+
+        # 3) EDA
         eda = basic_eda(df)
 
-        # определяем задачу
+        # 4) определяем задачу
         task = detect_task(df, target=target)
 
-        # пробуем обучить, если есть что
+        # 5) пробуем обучить, если есть что
         model_res = None
         if task["task"] != "eda" and task["target"]:
             model_res = train_baseline(df, task["target"], task["task"])
 
-        # собираем красивый текст
-        report_text = build_report(eda, task, model_res)
+        # 6) собираем человекочитаемый отчёт (функция у нас теперь в agent.tools)
+        report_text = build_report(df, eda, task, model_res)
 
         return JSONResponse(
             {
@@ -141,12 +121,24 @@ async def upload_dataset(
             }
         )
 
-    except Exception as e:
-        return JSONResponse(
+    except ValueError as e:
+        # это наши осознанные ошибки чтения
+        raise HTTPException(
             status_code=400,
-            content={
+            detail={
                 "error": "failed_to_process_file",
                 "details": str(e),
                 "hint": "проверь разделитель (',' или ';'), названия колонок и target",
             },
         )
+    except Exception as e:
+        # всё остальное
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "failed_to_process_file",
+                "details": str(e),
+                "hint": "проверь разделитель (',' или ';'), названия колонок и target",
+            },
+        )
+
