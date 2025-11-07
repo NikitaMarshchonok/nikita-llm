@@ -1,8 +1,12 @@
 # agent/tools.py
-
 from __future__ import annotations
 
+import os
 import re
+import json
+import uuid
+import base64
+from io import BytesIO
 from typing import Optional, Literal
 
 import numpy as np
@@ -15,23 +19,26 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.metrics import accuracy_score, f1_score, mean_squared_error
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+import joblib
+
+import matplotlib
+matplotlib.use("Agg")  # чтобы рендерить без GUI
+import matplotlib.pyplot as plt
 
 
 # ---------------------------------------------------------------------
 # 1. EDA
 # ---------------------------------------------------------------------
 def basic_eda(df: pd.DataFrame) -> dict:
-    """Простой EDA: размер, типы, пропуски, немного статистики."""
     eda = {
         "shape": list(df.shape),
         "dtypes": {c: str(df[c].dtype) for c in df.columns},
         "nulls": {c: int(df[c].isna().sum()) for c in df.columns},
     }
 
-    # добавим чуть-чуть статистики по числовым — полезно в отчёте
     numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
     stats = {}
-    for c in numeric_cols[:20]:  # не спамим сотней колонок
+    for c in numeric_cols[:20]:
         ser = df[c]
         stats[c] = {
             "mean": float(ser.mean()),
@@ -44,7 +51,7 @@ def basic_eda(df: pd.DataFrame) -> dict:
 
 
 # ---------------------------------------------------------------------
-# 2. угадывание таргета и типа задачи
+# 2. угадывание таргета и задачи
 # ---------------------------------------------------------------------
 ID_LIKE = {"id", "ID", "Id", "index", "Rk", "rank"}
 
@@ -54,17 +61,8 @@ def _looks_like_id(colname: str) -> bool:
 
 
 def _guess_target(df: pd.DataFrame) -> tuple[Literal["eda", "classification", "regression"], Optional[str]]:
-    """
-    Если пользователь target не дал — попробуем сами.
-    Алгоритм простой:
-      1. сначала ищем 'label', 'target', 'y'
-      2. потом небольшой категориальный столбец
-      3. потом числовой
-      4. если ничего — только EDA
-    """
     lower_cols = {c.lower(): c for c in df.columns}
 
-    # 1) популярные имена
     for cand in ("target", "label", "class", "y"):
         if cand in lower_cols:
             col = lower_cols[cand]
@@ -73,7 +71,7 @@ def _guess_target(df: pd.DataFrame) -> tuple[Literal["eda", "classification", "r
             else:
                 return "regression", col
 
-    # 2) маленькие категориальные — хороши для классификации
+    # маленькие категориальные
     for c in df.columns:
         if _looks_like_id(c):
             continue
@@ -81,7 +79,7 @@ def _guess_target(df: pd.DataFrame) -> tuple[Literal["eda", "classification", "r
         if 2 <= uniq <= 30:
             return "classification", c
 
-    # 3) любой числовой, который не id
+    # числовые
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
     for c in num_cols:
         if _looks_like_id(c):
@@ -89,14 +87,11 @@ def _guess_target(df: pd.DataFrame) -> tuple[Literal["eda", "classification", "r
         if df[c].nunique() > 1:
             return "regression", c
 
-    # не нашли
     return "eda", None
 
 
 def detect_task(df: pd.DataFrame, target: Optional[str] = None) -> dict:
-    """Определяем задачу и колонку-таргет."""
     if target is not None and target in df.columns:
-        # пользователь сказал явно
         nunique = df[target].nunique()
         if df[target].dtype == "object" or nunique <= 30:
             task = "classification"
@@ -104,32 +99,27 @@ def detect_task(df: pd.DataFrame, target: Optional[str] = None) -> dict:
             task = "regression"
         return {"task": task, "target": target}
 
-    # иначе угадываем
     task, tgt = _guess_target(df)
     return {"task": task, "target": tgt}
-    
+
 
 # ---------------------------------------------------------------------
 # 3. препроцессинг
 # ---------------------------------------------------------------------
 def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Попробуем строки, похожие на числа, привести к числам.
-    Это как раз нужно для твоих cricket / sports датасетов.
-    """
     new_df = df.copy()
     for col in new_df.columns:
         if new_df[col].dtype == "object":
-            # попробуем
-            converted = pd.to_numeric(new_df[col].str.replace(",", "").str.replace(" ", ""), errors="ignore")
-            # если стало числом — заменим
+            converted = pd.to_numeric(
+                new_df[col].astype(str).str.replace(",", "").str.replace(" ", ""),
+                errors="ignore",
+            )
             if converted.dtype != "object":
                 new_df[col] = converted
     return new_df
 
 
 def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
-    """Строим sklearn-препроцессор под наш датафрейм."""
     numeric_features = X.select_dtypes(include=["int64", "float64", "int32", "float32"]).columns.tolist()
     categorical_features = [c for c in X.columns if c not in numeric_features]
 
@@ -158,46 +148,46 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
 # ---------------------------------------------------------------------
 # 4. обучение базовой модели
 # ---------------------------------------------------------------------
-def train_baseline(df: pd.DataFrame, target: str, task: str) -> Optional[dict]:
-    """
-    Обучаем очень базовую модель поверх авто-препроцессинга.
-    Возвращаем метрики и тип модели.
-    """
+def train_baseline(df: pd.DataFrame, target: str, task: str):
     if target not in df.columns:
-        return None
+        return None, None
 
-    # сначала попытаемся привести строковые числа
     df = _coerce_numeric(df)
 
     y = df[target]
     X = df.drop(columns=[target])
 
-    # если всё ещё пусто
     if X.shape[1] == 0:
-        return None
+        return None, None
 
     preprocessor = build_preprocessor(X)
 
     if task == "classification":
+        # важно: проверим, что классов >= 2
+        if y.nunique() < 2:
+            raise ValueError("Классов меньше двух, обучать классификацию нельзя")
+
         model = RandomForestClassifier(
             n_estimators=200,
             random_state=42,
             n_jobs=-1,
         )
         clf = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
+        strat = y if y.nunique() < 50 else None
         X_train, X_val, y_train, y_val = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y if y.nunique() < 50 else None
+            X, y, test_size=0.2, random_state=42, stratify=strat
         )
         clf.fit(X_train, y_train)
         preds = clf.predict(X_val)
 
         acc = float(accuracy_score(y_val, preds))
         f1 = float(f1_score(y_val, preds, average="weighted"))
+
         return {
             "model_type": "RandomForestClassifier",
             "accuracy": acc,
             "f1": f1,
-        }
+        }, clf
 
     elif task == "regression":
         model = RandomForestRegressor(
@@ -216,8 +206,115 @@ def train_baseline(df: pd.DataFrame, target: str, task: str) -> Optional[dict]:
         return {
             "model_type": "RandomForestRegressor",
             "rmse": rmse,
-        }
+        }, reg
 
     else:
-        # 'eda' и т.п.
-        return None
+        return None, None
+
+
+# ---------------------------------------------------------------------
+# 5. отчёт в виде текста
+# ---------------------------------------------------------------------
+def build_report(df: pd.DataFrame, eda: dict, task: dict, model: dict | None) -> str:
+    rows, cols = eda["shape"]
+    lines: list[str] = []
+
+    lines.append(f"📊 В датасете {rows} строк и {cols} колонок.")
+
+    # пропуски
+    nulls = eda.get("nulls", {})
+    top_nulls = {k: v for k, v in nulls.items() if v > 0}
+    if top_nulls:
+        lines.append("🕳️ Пропуски (топ):")
+        for k, v in list(top_nulls.items())[:10]:
+            lines.append(f"  • {k}: {v}")
+
+    # немного про числа
+    num_stats = eda.get("numeric_stats", {})
+    if num_stats:
+        lines.append("📐 Числовые признаки (mean / std / min / max):")
+        for name, st in list(num_stats.items())[:10]:
+            lines.append(
+                f"  • {name}: {st['mean']:.3f}/{st['std']:.3f}/{st['min']}/{st['max']}"
+            )
+
+    # задача
+    if task["task"] == "eda" or task["target"] is None:
+        lines.append("🧠 Подходящей целевой колонки не нашлось — сделан только EDA.")
+    else:
+        lines.append(f'🧠 Задача: {task["task"]} по колонке "{task["target"]}".')
+
+    # модель
+    if model:
+        if "accuracy" in model:
+            lines.append(
+                f'🧪 Модель: {model["model_type"]}, accuracy={model["accuracy"]:.3f}, f1={model["f1"]:.3f}'
+            )
+        elif "rmse" in model:
+            lines.append(
+                f'🧪 Модель: {model["model_type"]}, RMSE={model["rmse"]:.3f}'
+            )
+    else:
+        lines.append("📦 Модель не обучалась.")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------
+# 6. графики → base64
+# ---------------------------------------------------------------------
+def make_plots_base64(df: pd.DataFrame) -> list[dict]:
+    plots: list[dict] = []
+
+    # гистограммы по первым 3 числовым
+    num_cols = df.select_dtypes(include=["number"]).columns.tolist()[:3]
+    for col in num_cols:
+        fig, ax = plt.subplots(figsize=(4, 3))
+        ax.hist(df[col].dropna(), bins=30)
+        ax.set_title(f"Distribution of {col}")
+        buf = BytesIO()
+        plt.tight_layout()
+        fig.savefig(buf, format="png")
+        plt.close(fig)
+        buf.seek(0)
+        b64 = base64.b64encode(buf.read()).decode("utf-8")
+        plots.append({"name": f"hist_{col}", "image_base64": b64})
+
+    # корреляция
+    if len(df.select_dtypes(include=["number"]).columns) >= 2:
+        corr = df.select_dtypes(include=["number"]).corr()
+        fig, ax = plt.subplots(figsize=(4, 3))
+        cax = ax.imshow(corr, cmap="viridis")
+        ax.set_xticks(range(len(corr.columns)))
+        ax.set_yticks(range(len(corr.columns)))
+        ax.set_xticklabels(corr.columns, rotation=90, fontsize=6)
+        ax.set_yticklabels(corr.columns, fontsize=6)
+        fig.colorbar(cax)
+        plt.tight_layout()
+        buf = BytesIO()
+        fig.savefig(buf, format="png")
+        plt.close(fig)
+        buf.seek(0)
+        b64 = base64.b64encode(buf.read()).decode("utf-8")
+        plots.append({"name": "correlation", "image_base64": b64})
+
+    return plots
+
+
+# ---------------------------------------------------------------------
+# 7. сохранение ранa
+# ---------------------------------------------------------------------
+def save_run(run_data: dict, model_pipeline) -> str:
+    run_id = str(uuid.uuid4())
+    run_dir = os.path.join("runs", run_id)
+    os.makedirs(run_dir, exist_ok=True)
+
+    # json
+    with open(os.path.join(run_dir, "report.json"), "w", encoding="utf-8") as f:
+        json.dump(run_data, f, ensure_ascii=False, indent=2)
+
+    # модель, если есть
+    if model_pipeline is not None:
+        joblib.dump(model_pipeline, os.path.join(run_dir, "model.joblib"))
+
+    return run_id
