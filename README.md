@@ -125,6 +125,7 @@ reduce training.max_steps (e.g. 3000 instead of 10000)
 
 
 
+
 ## 7. Next steps (agent plan)
 
 ✅ train and get checkpoint
@@ -154,3 +155,9 @@ logs/
 data/raw/
 
 data/processed/
+
+
+
+author:
+
+Nikita Marshchonok
