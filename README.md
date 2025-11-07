@@ -1,4 +1,4 @@
-# nikita-llm
+# nikita-llm(version1)
 
 Custom LLM training project scaffolded with [`@theanikrtgiri/create-llm`].
 
