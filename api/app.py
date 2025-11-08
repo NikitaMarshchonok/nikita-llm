@@ -15,6 +15,7 @@ from agent.tools import (
     detect_task,
     train_baseline,
     build_report,
+    make_plots_base64,  # добавили
 )
 
 app = FastAPI(
@@ -71,7 +72,8 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 @app.get("/ui")
 def ui():
-    return FileResponse(os.path.join("api", "frontend.html"))
+    # теперь точно туда, где лежит наш фронт
+    return FileResponse(os.path.join("api", "static", "frontend.html"))
 
 
 # ---------- API ----------
@@ -89,9 +91,11 @@ async def upload_dataset(
     try:
         contents = await file.read()
 
+        # 1) читаем и нормализуем
         df = read_csv_safely(contents)
         df = normalize_columns(df)
 
+        # 2) если пользователь прислал target — тоже нормализуем
         if target is not None:
             target = (
                 target.strip()
@@ -101,25 +105,28 @@ async def upload_dataset(
                 .replace("/", "_")
             )
 
+        # 3) EDA
         eda = basic_eda(df)
+
+        # 4) задача
         task = detect_task(df, target=target)
 
+        # 5) базовая модель (без return_model — в твоём tools этого нет)
         model_res = None
-        pipeline = None
         if task["task"] != "eda" and task["target"]:
             model_res = train_baseline(
                 df,
                 task["target"],
                 task["task"],
-                return_model=True,
             )
-            # model_res может быть None, поэтому аккуратно
-            if model_res is not None and "pipeline" in model_res:
-                pipeline = model_res.pop("pipeline")
 
+        # 6) отчёт
         report_text = build_report(df, eda, task, model_res)
 
-        # ---- сохраняем запуск ----
+        # 7) графики
+        plots = make_plots_base64(df)
+
+        # 8) сохраняем запуск в память
         run_id = f"run_{uuid4().hex[:8]}"
         RUNS[run_id] = {
             "filename": file.filename,
@@ -127,7 +134,7 @@ async def upload_dataset(
             "task": task,
             "model": model_res,
             "report": report_text,
-            "pipeline": pipeline,
+            "plots": plots,
             "columns": list(df.columns),
         }
 
@@ -139,6 +146,7 @@ async def upload_dataset(
                 "task": task,
                 "model": model_res,
                 "report": report_text,
+                "plots": plots,
             }
         )
 
@@ -166,7 +174,18 @@ async def upload_dataset(
 def get_run(run_id: str):
     if run_id not in RUNS:
         raise HTTPException(status_code=404, detail="run_id not found")
-    # pipeline не отдаём наружу (его всё равно не сериализовать)
-    data = RUNS[run_id].copy()
-    data.pop("pipeline", None)
-    return data
+    # тут уже нет pipeline, так что просто отдаём
+    return RUNS[run_id]
+
+
+@app.get("/runs")
+def list_runs():
+    items = []
+    for run_id, data in RUNS.items():
+        items.append({
+            "run_id": run_id,
+            "filename": data.get("filename"),
+            "task": data.get("task"),
+            "has_model": data.get("model") is not None,
+        })
+    return items
