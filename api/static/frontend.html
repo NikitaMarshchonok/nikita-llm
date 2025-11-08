@@ -3,203 +3,420 @@
 <head>
   <meta charset="UTF-8" />
   <title>Nikita DS Agent</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
+    :root {
+      --bg: #0f172a;
+      --bg-light: #111827;
+      --card: #1f2937;
+      --card-light: #243046;
+      --accent: #6366f1;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --danger: #f43f5e;
+      --success: #22c55e;
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; }
     body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #0f172a;
-      color: #e2e8f0;
       margin: 0;
-      padding: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
     }
     header {
-      background: #020617;
-      padding: 16px 24px;
-      border-bottom: 1px solid #1e293b;
+      padding: 16px 20px 10px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
     }
-    h1 {
-      margin: 0;
-      font-size: 20px;
+    .badge {
+      background: rgba(99, 102, 241, 0.2);
+      color: var(--text);
+      padding: 2px 10px;
+      border-radius: 999px;
+      font-size: 12px;
     }
-    .container {
-      max-width: 1100px;
-      margin: 20px auto;
-      padding: 0 16px;
-      display: grid;
-      grid-template-columns: 320px 1fr;
+    main {
+      flex: 1;
+      display: flex;
       gap: 16px;
+      padding: 16px 16px 20px;
+      overflow: hidden;
+    }
+    /* левая колонка и центр */
+    .left-panel {
+      width: 260px;
+      background: var(--card);
+      border-radius: var(--radius);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      height: calc(100vh - 90px);
+    }
+    .middle-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      height: calc(100vh - 90px);
+    }
+    .right-panel {
+      width: 240px;
+      background: var(--card);
+      border-radius: var(--radius);
+      padding: 14px;
+      height: calc(100vh - 90px);
+      overflow-y: auto;
     }
     .card {
-      background: #0f172a;
-      border: 1px solid #1f2937;
-      border-radius: 12px;
-      padding: 16px;
+      background: var(--card);
+      border-radius: var(--radius);
+      border: 1px solid rgba(148, 163, 184, 0.05);
     }
     label {
+      font-size: 13px;
+      color: var(--text);
+      margin-bottom: 4px;
       display: block;
-      margin-bottom: 6px;
-      font-size: 14px;
     }
-    input[type="file"],
-    input[type="text"] {
+    input[type="file"] {
       width: 100%;
-      margin-bottom: 12px;
-    }
-    input[type="text"] {
-      background: #020617;
-      border: 1px solid #1f2937;
-      border-radius: 6px;
-      padding: 6px 10px;
-      color: #e2e8f0;
-    }
-    button {
-      background: #6366f1;
-      border: none;
+      background: var(--bg-light);
+      border: 1px solid rgba(148, 163, 184, 0.2);
       border-radius: 8px;
-      color: white;
-      padding: 8px 16px;
-      cursor: pointer;
-      font-size: 14px;
-    }
-    button:disabled {
-      opacity: .5;
-      cursor: not-allowed;
-    }
-    pre {
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      background: #020617;
-      border-radius: 8px;
-      padding: 12px;
+      padding: 5px 6px;
+      color: var(--text-muted);
       font-size: 13px;
     }
-    .section-title {
-      font-size: 14px;
+    input[type="text"] {
+      width: 100%;
+      background: var(--bg-light);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      border-radius: 8px;
+      padding: 6px 8px;
+      color: var(--text);
+      outline: none;
+      font-size: 13px;
+    }
+    input[type="text"]:focus {
+      border-color: rgba(99, 102, 241, 0.8);
+    }
+    button {
+      background: var(--accent);
+      border: none;
+      color: white;
+      padding: 8px 0;
+      border-radius: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: 0.15s;
+      font-size: 13px;
+    }
+    button:disabled {
+      background: rgba(99, 102, 241, 0.3);
+      cursor: not-allowed;
+    }
+    button:hover:not(:disabled) {
+      filter: brightness(1.02);
+    }
+    .status-ok {
+      font-size: 12px;
+      color: var(--success);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .status-err {
+      font-size: 12px;
+      color: var(--danger);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .report-box {
+      background: var(--card);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      height: 46%;
+      min-height: 220px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, SFMono-Regular, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .plots-row {
+      display: flex;
+      gap: 16px;
+      height: 54%;
+      overflow-x: auto;
+    }
+    .plot-card {
+      background: var(--card);
+      border-radius: 14px;
+      border: 1px solid rgba(148, 163, 184, 0.05);
+      min-width: 220px;
+      max-width: 240px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .plot-card img {
+      width: 100%;
+      display: block;
+    }
+    .plot-title {
+      font-size: 12px;
+      padding: 6px 8px 8px;
+      color: var(--text-muted);
+    }
+    /* right panel runs */
+    .runs-title {
+      font-size: 13px;
       margin-bottom: 8px;
       font-weight: 600;
     }
-    .badge {
-      display: inline-block;
-      background: #1d4ed8;
-      padding: 2px 8px;
-      border-radius: 999px;
+    .run-item {
+      background: rgba(15, 23, 42, 0.2);
+      border: 1px solid rgba(148, 163, 184, 0.03);
+      border-radius: 10px;
+      padding: 6px 8px;
+      margin-bottom: 6px;
+      cursor: pointer;
+    }
+    .run-item.active {
+      border-color: rgba(99, 102, 241, 0.6);
+      background: rgba(99, 102, 241, 0.1);
+    }
+    .run-item small {
+      display: block;
+      color: var(--text-muted);
       font-size: 11px;
-      margin-left: 6px;
     }
-    .plots {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .plots img {
-      max-width: 240px;
-      border-radius: 8px;
-      border: 1px solid #1f2937;
-    }
-    .tiny {
+    .runs-empty {
       font-size: 12px;
-      color: #94a3b8;
+      color: var(--text-muted);
+    }
+    @media (max-width: 1100px) {
+      main {
+        flex-direction: column;
+      }
+      .left-panel,
+      .right-panel {
+        width: 100%;
+        height: auto;
+      }
+      .middle-panel {
+        height: auto;
+      }
+      .plots-row {
+        height: auto;
+      }
     }
   </style>
 </head>
 <body>
   <header>
-    <h1>Nikita DS Agent <span class="badge">beta</span></h1>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <h1 style="font-size: 18px; font-weight: 600; margin:0;">Nikita DS Agent</h1>
+      <span class="badge">beta</span>
+    </div>
+    <small style="color:var(--text-muted); font-size:12px;">CSV → EDA → baseline → сохранение запусков</small>
   </header>
 
-  <div class="container">
-    <div class="card">
-      <h2 style="margin-top:0;font-size:16px;">Загрузка датасета</h2>
+  <main>
+    <!-- левая панель: загрузка -->
+    <section class="left-panel">
+      <h2 style="font-size:14px; margin:0 0 4px;">Загрузка датасета</h2>
+      <p style="font-size:12px; color:var(--text-muted); margin:0 0 8px;">CSV-файл + (опционально) имя target.</p>
+
       <label for="file">CSV файл</label>
-      <input type="file" id="file" accept=".csv" />
+      <input id="file" type="file" accept=".csv" />
+
       <label for="target">Target (необязательно)</label>
-      <input type="text" id="target" placeholder="например, price или label" />
-      <button id="sendBtn">Отправить</button>
-      <p class="tiny" style="margin-top:10px;">
-        Файл отправится на <code>/upload</code>, бэкенд сделает EDA и попробует обучить базовую модель.
-      </p>
-      <p id="status" class="tiny"></p>
-    </div>
+      <input id="target" type="text" placeholder="например, price или label" />
 
-    <div class="card" style="min-height:400px;">
-      <div id="output">
-        <p class="tiny">Результат появится здесь 👇</p>
+      <button id="uploadBtn" onclick="uploadDataset()">Отправить</button>
+      <div id="status" style="min-height:22px; margin-top:4px; font-size:12px;"></div>
+      <small style="font-size:11px; color:var(--text-muted);">Файл отправляется на <code>/upload</code>, бэкенд делает EDA и модель.</small>
+    </section>
+
+    <!-- центр: отчёт + графики -->
+    <section class="middle-panel">
+      <div class="report-box" id="reportBox">
+        Здесь появится отчёт ✨
       </div>
-    </div>
-  </div>
+      <div class="plots-row" id="plotsRow">
+        <!-- сюда вставим графики -->
+      </div>
+    </section>
 
-  <div class="container" style="grid-template-columns: 1fr;">
-    <div class="card">
-      <div class="section-title">Графики</div>
-      <div id="plots" class="plots"></div>
-    </div>
-  </div>
+    <!-- справа: список запусков -->
+    <aside class="right-panel">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div class="runs-title">Последние загрузки</div>
+        <button style="width:auto; padding:3px 8px; font-size:11px;" onclick="loadRuns()">↻</button>
+      </div>
+      <div id="runsList" style="min-height:60px;"></div>
+    </aside>
+  </main>
 
   <script>
-    const btn = document.getElementById('sendBtn');
-    const fileInput = document.getElementById('file');
-    const targetInput = document.getElementById('target');
+    const reportBox = document.getElementById('reportBox');
+    const plotsRow = document.getElementById('plotsRow');
     const statusEl = document.getElementById('status');
-    const outputEl = document.getElementById('output');
-    const plotsEl = document.getElementById('plots');
+    const runsList = document.getElementById('runsList');
+    const uploadBtn = document.getElementById('uploadBtn');
 
-    btn.onclick = async () => {
+    let currentRunId = null;
+
+    async function uploadDataset() {
+      const fileInput = document.getElementById('file');
+      const targetInput = document.getElementById('target');
       const file = fileInput.files[0];
+
       if (!file) {
-        alert('Выбери CSV файл');
+        statusEl.innerHTML = '<span class="status-err">Сначала выбери CSV</span>';
         return;
       }
 
       const formData = new FormData();
       formData.append('file', file);
-      if (targetInput.value.trim() !== '') {
-        formData.append('target', targetInput.value.trim());
-      }
+      formData.append('target', targetInput.value || '');
 
-      btn.disabled = true;
-      statusEl.textContent = 'Загружаю и анализирую...';
+      uploadBtn.disabled = true;
+      statusEl.innerHTML = '<span style="font-size:12px; color:var(--text-muted);">Загружаем...</span>';
 
       try {
         const resp = await fetch('/upload', {
           method: 'POST',
-          body: formData
+          body: formData,
         });
+
         const data = await resp.json();
 
         if (!resp.ok) {
-          outputEl.innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
-          statusEl.textContent = 'Ошибка';
-          btn.disabled = false;
+          statusEl.innerHTML = '<div class="status-err">Ошибка: ' + (data.detail?.details || 'неизвестно') + '</div>';
+          uploadBtn.disabled = false;
           return;
         }
 
-        // основной блок
-        outputEl.innerHTML =
-          '<pre>' +
-          (data.report || JSON.stringify(data, null, 2)) +
-          '</pre>';
+        statusEl.innerHTML = '<span class="status-ok">Готово ✅ run_id: ' + data.run_id + '</span>';
+        currentRunId = data.run_id;
 
-        // графики, если бэкенд их отдаёт
-        plotsEl.innerHTML = '';
-        if (data.plots && Array.isArray(data.plots)) {
-          data.plots.forEach(p => {
-            const img = document.createElement('img');
-            img.src = 'data:image/png;base64,' + p.image_base64;
-            img.alt = p.name;
-            plotsEl.appendChild(img);
-          });
-        }
+        renderReport(data);
+        renderPlots(data);
 
-        statusEl.textContent = 'Готово ✅';
+        // обновим список запусков
+        loadRuns();
 
       } catch (err) {
         console.error(err);
-        statusEl.textContent = 'Ошибка запроса';
-        outputEl.innerHTML = '<pre>' + err + '</pre>';
+        statusEl.innerHTML = '<div class="status-err">Ошибка сети</div>';
       } finally {
-        btn.disabled = false;
+        uploadBtn.disabled = false;
       }
-    };
+    }
+
+    function renderReport(data) {
+      // если бэкенд отдаёт report — используем
+      if (data.report) {
+        reportBox.textContent = data.report;
+        return;
+      }
+      // иначе соберём что-то из полей
+      let txt = '📁 ' + (data.filename || '') + '\n';
+      if (data.eda?.shape) {
+        txt += `📊 ${data.eda.shape[0]} строк x ${data.eda.shape[1]} колонок\n`;
+      }
+      if (data.task?.task) {
+        txt += `🧠 Задача: ${data.task.task} ${data.task.target ? 'по ' + data.task.target : ''}\n`;
+      }
+      if (data.model) {
+        txt += `🧪 Модель: ${data.model.model_type}`;
+        if (data.model.accuracy != null) {
+          txt += `, acc=${data.model.accuracy.toFixed(3)}`;
+        }
+        if (data.model.f1 != null) {
+          txt += `, f1=${data.model.f1.toFixed(3)}`;
+        }
+        if (data.model.rmse != null) {
+          txt += `, rmse=${data.model.rmse.toFixed(3)}`;
+        }
+      }
+      reportBox.textContent = txt;
+    }
+
+    function renderPlots(data) {
+      plotsRow.innerHTML = '';
+      if (!data.plots || !Array.isArray(data.plots) || data.plots.length === 0) {
+        // ничего не рисуем
+        return;
+      }
+      data.plots.forEach(p => {
+        const card = document.createElement('div');
+        card.className = 'plot-card';
+        const img = document.createElement('img');
+        img.src = 'data:image/png;base64,' + p.image_base64;
+        const title = document.createElement('div');
+        title.className = 'plot-title';
+        title.textContent = p.name;
+        card.appendChild(img);
+        card.appendChild(title);
+        plotsRow.appendChild(card);
+      });
+    }
+
+    async function loadRuns() {
+      try {
+        const resp = await fetch('/runs');
+        if (!resp.ok) return;
+        const arr = await resp.json();
+        runsList.innerHTML = '';
+        if (!arr.length) {
+          runsList.innerHTML = '<div class="runs-empty">Пока нет запусков</div>';
+          return;
+        }
+        arr.forEach(run => {
+          const div = document.createElement('div');
+          div.className = 'run-item' + (run.run_id === currentRunId ? ' active' : '');
+          div.onclick = () => selectRun(run.run_id);
+          div.innerHTML = `
+            <div style="font-size:12px;">${run.filename || '(без имени)'}</div>
+            <small>${run.run_id}</small>
+            <small>${run.task ? (run.task.task + (run.task.target ? ' · ' + run.task.target : '')) : ''}</small>
+          `;
+          runsList.appendChild(div);
+        });
+      } catch (e) {
+        console.warn('cannot load runs', e);
+      }
+    }
+
+    async function selectRun(runId) {
+      try {
+        const resp = await fetch('/runs/' + runId);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        currentRunId = runId;
+        renderReport(data);
+        renderPlots(data);
+        // подсветим активный
+        Array.from(runsList.children).forEach(ch => {
+          ch.classList.toggle('active', ch.textContent.includes(runId));
+        });
+      } catch (e) {
+        console.warn('cannot load run', e);
+      }
+    }
+
+    // подгружаем список при входе
+    loadRuns();
   </script>
 </body>
 </html>
