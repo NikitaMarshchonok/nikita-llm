@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Nikita DS Agent</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      margin: 0;
+      padding: 0;
+    }
+    header {
+      background: #020617;
+      padding: 16px 24px;
+      border-bottom: 1px solid #1e293b;
+    }
+    h1 {
+      margin: 0;
+      font-size: 20px;
+    }
+    .container {
+      max-width: 1100px;
+      margin: 20px auto;
+      padding: 0 16px;
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 16px;
+    }
+    .card {
+      background: #0f172a;
+      border: 1px solid #1f2937;
+      border-radius: 12px;
+      padding: 16px;
+    }
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 14px;
+    }
+    input[type="file"],
+    input[type="text"] {
+      width: 100%;
+      margin-bottom: 12px;
+    }
+    input[type="text"] {
+      background: #020617;
+      border: 1px solid #1f2937;
+      border-radius: 6px;
+      padding: 6px 10px;
+      color: #e2e8f0;
+    }
+    button {
+      background: #6366f1;
+      border: none;
+      border-radius: 8px;
+      color: white;
+      padding: 8px 16px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:disabled {
+      opacity: .5;
+      cursor: not-allowed;
+    }
+    pre {
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      background: #020617;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 13px;
+    }
+    .section-title {
+      font-size: 14px;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+    .badge {
+      display: inline-block;
+      background: #1d4ed8;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      margin-left: 6px;
+    }
+    .plots {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .plots img {
+      max-width: 240px;
+      border-radius: 8px;
+      border: 1px solid #1f2937;
+    }
+    .tiny {
+      font-size: 12px;
+      color: #94a3b8;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Nikita DS Agent <span class="badge">beta</span></h1>
+  </header>
+
+  <div class="container">
+    <div class="card">
+      <h2 style="margin-top:0;font-size:16px;">Загрузка датасета</h2>
+      <label for="file">CSV файл</label>
+      <input type="file" id="file" accept=".csv" />
+      <label for="target">Target (необязательно)</label>
+      <input type="text" id="target" placeholder="например, price или label" />
+      <button id="sendBtn">Отправить</button>
+      <p class="tiny" style="margin-top:10px;">
+        Файл отправится на <code>/upload</code>, бэкенд сделает EDA и попробует обучить базовую модель.
+      </p>
+      <p id="status" class="tiny"></p>
+    </div>
+
+    <div class="card" style="min-height:400px;">
+      <div id="output">
+        <p class="tiny">Результат появится здесь 👇</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="container" style="grid-template-columns: 1fr;">
+    <div class="card">
+      <div class="section-title">Графики</div>
+      <div id="plots" class="plots"></div>
+    </div>
+  </div>
+
+  <script>
+    const btn = document.getElementById('sendBtn');
+    const fileInput = document.getElementById('file');
+    const targetInput = document.getElementById('target');
+    const statusEl = document.getElementById('status');
+    const outputEl = document.getElementById('output');
+    const plotsEl = document.getElementById('plots');
+
+    btn.onclick = async () => {
+      const file = fileInput.files[0];
+      if (!file) {
+        alert('Выбери CSV файл');
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('file', file);
+      if (targetInput.value.trim() !== '') {
+        formData.append('target', targetInput.value.trim());
+      }
+
+      btn.disabled = true;
+      statusEl.textContent = 'Загружаю и анализирую...';
+
+      try {
+        const resp = await fetch('/upload', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          outputEl.innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+          statusEl.textContent = 'Ошибка';
+          btn.disabled = false;
+          return;
+        }
+
+        // основной блок
+        outputEl.innerHTML =
+          '<pre>' +
+          (data.report || JSON.stringify(data, null, 2)) +
+          '</pre>';
+
+        // графики, если бэкенд их отдаёт
+        plotsEl.innerHTML = '';
+        if (data.plots && Array.isArray(data.plots)) {
+          data.plots.forEach(p => {
+            const img = document.createElement('img');
+            img.src = 'data:image/png;base64,' + p.image_base64;
+            img.alt = p.name;
+            plotsEl.appendChild(img);
+          });
+        }
+
+        statusEl.textContent = 'Готово ✅';
+
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = 'Ошибка запроса';
+        outputEl.innerHTML = '<pre>' + err + '</pre>';
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  </script>
+</body>
+</html>
