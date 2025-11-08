@@ -63,6 +63,7 @@ def _looks_like_id(colname: str) -> bool:
 def _guess_target(df: pd.DataFrame) -> tuple[Literal["eda", "classification", "regression"], Optional[str]]:
     lower_cols = {c.lower(): c for c in df.columns}
 
+    # популярные названия
     for cand in ("target", "label", "class", "y"):
         if cand in lower_cols:
             col = lower_cols[cand]
@@ -104,19 +105,28 @@ def detect_task(df: pd.DataFrame, target: Optional[str] = None) -> dict:
 
 
 # ---------------------------------------------------------------------
-# 3. препроцессинг
+# 3. приведение строк к числам и препроцессинг
 # ---------------------------------------------------------------------
 def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Пробуем строки, похожие на числа, привести к числам.
+    Без warnings.
+    """
     new_df = df.copy()
     for col in new_df.columns:
         if new_df[col].dtype == "object":
-            converted = pd.to_numeric(
-                new_df[col].astype(str).str.replace(",", "").str.replace(" ", ""),
-                errors="ignore",
-            )
-            if converted.dtype != "object":
+            # сначала чистим строку
+            ser = new_df[col].astype(str).str.replace(",", "").str.replace(" ", "")
+            try:
+                converted = pd.to_numeric(ser)
+            except Exception:
+                # не получилось — оставляем как было
+                continue
+            else:
+                # получилось — подменяем колонку
                 new_df[col] = converted
     return new_df
+
 
 
 def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
@@ -148,10 +158,16 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
 # ---------------------------------------------------------------------
 # 4. обучение базовой модели
 # ---------------------------------------------------------------------
-def train_baseline(df: pd.DataFrame, target: str, task: str) -> Optional[dict]:
+def train_baseline(
+    df: pd.DataFrame,
+    target: str,
+    task: str,
+    return_model: bool = False,
+) -> Optional[dict]:
     """
     Обучаем очень базовую модель поверх авто-препроцессинга.
     Возвращаем метрики и тип модели.
+    Если return_model=True — ещё и сам sklearn-пайплайн (для /predict).
     """
     if target not in df.columns:
         return None
@@ -167,6 +183,7 @@ def train_baseline(df: pd.DataFrame, target: str, task: str) -> Optional[dict]:
 
     preprocessor = build_preprocessor(X)
 
+    # ----- классификация -----
     if task == "classification":
         model = RandomForestClassifier(
             n_estimators=200,
@@ -193,12 +210,16 @@ def train_baseline(df: pd.DataFrame, target: str, task: str) -> Optional[dict]:
         acc = float(accuracy_score(y_val, preds))
         f1 = float(f1_score(y_val, preds, average="weighted"))
 
-        return {
+        res: dict = {
             "model_type": "RandomForestClassifier",
             "accuracy": acc,
             "f1": f1,
         }
+        if return_model:
+            res["pipeline"] = pipe
+        return res
 
+    # ----- регрессия -----
     elif task == "regression":
         model = RandomForestRegressor(
             n_estimators=200,
@@ -214,17 +235,20 @@ def train_baseline(df: pd.DataFrame, target: str, task: str) -> Optional[dict]:
         pipe.fit(X_train, y_train)
         preds = pipe.predict(X_val)
 
-        # ---- ВАЖНО: считаем RMSE совместимо с любой версией sklearn ----
-        mse = float(mean_squared_error(y_val, preds))  # без параметров
+        mse = float(mean_squared_error(y_val, preds))
         rmse = mse ** 0.5
 
-        return {
+        res: dict = {
             "model_type": "RandomForestRegressor",
             "rmse": rmse,
         }
+        if return_model:
+            res["pipeline"] = pipe
+        return res
 
     else:
         return None
+
 
 # ---------------------------------------------------------------------
 # 5. отчёт в виде текста
@@ -316,18 +340,21 @@ def make_plots_base64(df: pd.DataFrame) -> list[dict]:
 
 
 # ---------------------------------------------------------------------
-# 7. сохранение ранa
+# 7. сохранение ранa на диск (если надо с диском работать)
 # ---------------------------------------------------------------------
 def save_run(run_data: dict, model_pipeline) -> str:
+    """
+    Сохраняет run в папку runs/<uuid>/ :
+      - report.json
+      - model.joblib (если есть модель)
+    """
     run_id = str(uuid.uuid4())
     run_dir = os.path.join("runs", run_id)
     os.makedirs(run_dir, exist_ok=True)
 
-    # json
     with open(os.path.join(run_dir, "report.json"), "w", encoding="utf-8") as f:
         json.dump(run_data, f, ensure_ascii=False, indent=2)
 
-    # модель, если есть
     if model_pipeline is not None:
         joblib.dump(model_pipeline, os.path.join(run_dir, "model.joblib"))
 
