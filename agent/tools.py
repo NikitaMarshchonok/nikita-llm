@@ -27,18 +27,19 @@ import matplotlib.pyplot as plt
 
 
 # ---------------------------------------------------------------------
-# 1. EDA
+# 1. EDA (расширенный)
 # ---------------------------------------------------------------------
-def basic_eda(df: pd.DataFrame) -> dict:
-    eda = {
+def basic_eda(df: pd.DataFrame, target: str | None = None) -> dict:
+    eda: dict = {
         "shape": list(df.shape),
         "dtypes": {c: str(df[c].dtype) for c in df.columns},
         "nulls": {c: int(df[c].isna().sum()) for c in df.columns},
     }
 
+    # числовая статистика
     numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
     stats = {}
-    for c in numeric_cols[:20]:
+    for c in numeric_cols[:30]:
         ser = df[c]
         stats[c] = {
             "mean": float(ser.mean()),
@@ -47,6 +48,42 @@ def basic_eda(df: pd.DataFrame) -> dict:
             "max": float(ser.max()),
         }
     eda["numeric_stats"] = stats
+
+    problems: list[str] = []
+
+    # 1) константы
+    constant_cols = [c for c in df.columns if df[c].nunique(dropna=False) <= 1]
+    if constant_cols:
+        eda["constant_columns"] = constant_cols
+        problems.append(f"Константные колонки: {', '.join(constant_cols[:5])}")
+
+    # 2) очень широкие категориальные
+    cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    high_cardinality = [c for c in cat_cols if df[c].nunique() > 200]
+    if high_cardinality:
+        eda["high_cardinality"] = {c: int(df[c].nunique()) for c in high_cardinality}
+        problems.append("Есть категориальные с >200 уникальных значений — их лучше кодировать аккуратно.")
+
+    # 3) дисбаланс таргета (если есть)
+    if target is not None and target in df.columns:
+        tgt_ser = df[target]
+        if tgt_ser.dtype == "object" or tgt_ser.nunique() <= 30:
+            vc = tgt_ser.value_counts(normalize=True)
+            eda["target_distribution"] = vc.round(3).to_dict()
+            if vc.iloc[0] > 0.85:
+                problems.append(f"Сильный дисбаланс таргета: класс '{vc.index[0]}' = {vc.iloc[0]:.2f}")
+
+    # 4) возможная утечка (для регрессии: фичи сильно коррелируют с таргетом)
+    if target is not None and target in df.columns and df[target].dtype != "object":
+        num_df = df.select_dtypes(include=["number"])
+        if target in num_df.columns and num_df.shape[1] > 1:
+            corr = num_df.corr()[target].drop(labels=[target]).abs().sort_values(ascending=False)
+            leak_like = corr[corr > 0.95]
+            if not leak_like.empty:
+                eda["leak_candidates"] = leak_like.to_dict()
+                problems.append("Есть признаки с корреляцией >0.95 с таргетом — возможная утечка.")
+
+    eda["problems"] = problems
     return eda
 
 
@@ -156,8 +193,10 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
 
 
 # ---------------------------------------------------------------------
-# 4. обучение базовой модели
+# 4. обучение базовой модели (без падений)
 # ---------------------------------------------------------------------
+from typing import Optional
+
 def train_baseline(
     df: pd.DataFrame,
     target: str,
@@ -165,90 +204,104 @@ def train_baseline(
     return_model: bool = False,
 ) -> Optional[dict]:
     """
-    Обучаем очень базовую модель поверх авто-препроцессинга.
-    Возвращаем метрики и тип модели.
-    Если return_model=True — ещё и сам sklearn-пайплайн (для /predict).
+    Обучаем очень базовую модель.
+    ВАЖНО: тут стараемся НИКОГДА не кидать исключения, чтобы /upload не падал.
+    Если что-то не так с данными — просто вернём None.
     """
-    if target not in df.columns:
+    try:
+        if target not in df.columns:
+            return None
+
+        # приведём строки-похожие-на-числа
+        df = _coerce_numeric(df)
+
+        # выкинем строки, где нет таргета
+        df = df[~df[target].isna()].copy()
+        if df.shape[0] < 20:  # слишком мало данных
+            return None
+
+        y = df[target]
+        X = df.drop(columns=[target])
+
+        if X.shape[1] == 0:
+            return None
+
+        preprocessor = build_preprocessor(X)
+
+        # КЛАССИФИКАЦИЯ
+        if task == "classification":
+            # если всего 1 класс — нечего учить
+            if y.nunique() < 2:
+                return None
+
+            model = RandomForestClassifier(
+                n_estimators=200,
+                random_state=42,
+                n_jobs=-1,
+            )
+
+            # можно ли стратифицировать
+            counts = y.value_counts(dropna=False)
+            can_stratify = (counts >= 2).all()
+
+            X_train, X_val, y_train, y_val = train_test_split(
+                X,
+                y,
+                test_size=0.2,
+                random_state=42,
+                stratify=y if (y.nunique() < 50 and can_stratify) else None,
+            )
+
+            pipe = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
+            pipe.fit(X_train, y_train)
+            preds = pipe.predict(X_val)
+
+            acc = float(accuracy_score(y_val, preds))
+            f1 = float(f1_score(y_val, preds, average="weighted"))
+
+            res = {
+                "model_type": "RandomForestClassifier",
+                "accuracy": acc,
+                "f1": f1,
+            }
+            if return_model:
+                res["pipeline"] = pipe
+            return res
+
+        # РЕГРЕССИЯ
+        elif task == "regression":
+            model = RandomForestRegressor(
+                n_estimators=200,
+                random_state=42,
+                n_jobs=-1,
+            )
+
+            X_train, X_val, y_train, y_val = train_test_split(
+                X, y, test_size=0.2, random_state=42
+            )
+
+            pipe = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
+            pipe.fit(X_train, y_train)
+            preds = pipe.predict(X_val)
+
+            mse = float(mean_squared_error(y_val, preds))
+            rmse = mse ** 0.5
+
+            res = {
+                "model_type": "RandomForestRegressor",
+                "rmse": rmse,
+            }
+            if return_model:
+                res["pipeline"] = pipe
+            return res
+
+        # если задача "eda" — не учим
+        else:
+            return None
+
+    except Exception:
+        # вообще на всё — тишина, просто без модели
         return None
-
-    # попробуем привести строковые числа
-    df = _coerce_numeric(df)
-
-    y = df[target]
-    X = df.drop(columns=[target])
-
-    if X.shape[1] == 0:
-        return None
-
-    preprocessor = build_preprocessor(X)
-
-    # ----- классификация -----
-    if task == "classification":
-        model = RandomForestClassifier(
-            n_estimators=200,
-            random_state=42,
-            n_jobs=-1,
-        )
-
-        # проверяем, можно ли стратифицировать
-        counts = y.value_counts(dropna=False)
-        can_stratify = (counts >= 2).all()
-
-        X_train, X_val, y_train, y_val = train_test_split(
-            X,
-            y,
-            test_size=0.2,
-            random_state=42,
-            stratify=y if (y.nunique() < 50 and can_stratify) else None,
-        )
-
-        pipe = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
-        pipe.fit(X_train, y_train)
-        preds = pipe.predict(X_val)
-
-        acc = float(accuracy_score(y_val, preds))
-        f1 = float(f1_score(y_val, preds, average="weighted"))
-
-        res: dict = {
-            "model_type": "RandomForestClassifier",
-            "accuracy": acc,
-            "f1": f1,
-        }
-        if return_model:
-            res["pipeline"] = pipe
-        return res
-
-    # ----- регрессия -----
-    elif task == "regression":
-        model = RandomForestRegressor(
-            n_estimators=200,
-            random_state=42,
-            n_jobs=-1,
-        )
-
-        X_train, X_val, y_train, y_val = train_test_split(
-            X, y, test_size=0.2, random_state=42
-        )
-
-        pipe = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
-        pipe.fit(X_train, y_train)
-        preds = pipe.predict(X_val)
-
-        mse = float(mean_squared_error(y_val, preds))
-        rmse = mse ** 0.5
-
-        res: dict = {
-            "model_type": "RandomForestRegressor",
-            "rmse": rmse,
-        }
-        if return_model:
-            res["pipeline"] = pipe
-        return res
-
-    else:
-        return None
-
 
 # ---------------------------------------------------------------------
 # 5. отчёт в виде текста
