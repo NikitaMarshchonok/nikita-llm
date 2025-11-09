@@ -16,8 +16,8 @@ from agent.tools import (
     train_baseline,
     build_report,
     make_plots_base64,
-    analyze_dataset,
-    build_recommendations,
+    analyze_dataset,       # <- используем с df, eda, task
+    build_recommendations, # <- порядок аргументов как в tools.py
 )
 
 app = FastAPI(
@@ -26,6 +26,7 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# простое хранилище в памяти
 RUNS: dict[str, dict] = {}
 
 
@@ -82,9 +83,11 @@ async def upload_dataset(
     try:
         contents = await file.read()
 
+        # --- читаем и нормализуем ---
         df = read_csv_safely(contents)
         df = normalize_columns(df)
 
+        # --- нормализуем target ---
         if target is not None:
             target = (
                 target.strip()
@@ -94,20 +97,30 @@ async def upload_dataset(
                 .replace("/", "_")
             )
 
+        # --- EDA ---
         eda = basic_eda(df)
+
+        # --- задача ---
         task = detect_task(df, target=target)
 
-        problems = analyze_dataset(df, task)
+        # --- диагностика проблем (ВАЖНО: передаём df, eda, task) ---
+        problems = analyze_dataset(df, eda, task)
 
+        # --- модель ---
         model_res = None
         if task["task"] != "eda" and task["target"]:
             model_res = train_baseline(df, task["target"], task["task"])
 
-        report_text = build_report(df, eda, task, model_res)
+        # --- отчёт (передаём problems) ---
+        report_text = build_report(df, eda, task, model_res, problems)
+
+        # --- графики ---
         plots = make_plots_base64(df)
 
-        recs = build_recommendations(eda, task, model_res, problems)
+        # --- рекомендации (передаём df первым) ---
+        recs = build_recommendations(df, eda, task, problems, model_res)
 
+        # --- сохраняем запуск ---
         run_id = f"run_{uuid4().hex[:8]}"
         RUNS[run_id] = {
             "run_id": run_id,
@@ -176,13 +189,10 @@ def list_runs():
     return items
 
 
-# ===== НОВОЕ: экспорт =====
+# ===== экспорт =====
 
 @app.get("/runs/{run_id}/report")
 def get_run_report(run_id: str):
-    """
-    Отдать ран как есть — удобно для интеграций или если хочешь скачать JSON.
-    """
     if run_id not in RUNS:
         raise HTTPException(status_code=404, detail="run_id not found")
     return RUNS[run_id]
@@ -190,9 +200,6 @@ def get_run_report(run_id: str):
 
 @app.get("/runs/{run_id}/download")
 def download_run_markdown(run_id: str):
-    """
-    Отдать человекочитаемый текст/markdown по ранy.
-    """
     if run_id not in RUNS:
         raise HTTPException(status_code=404, detail="run_id not found")
 
@@ -207,7 +214,6 @@ def download_run_markdown(run_id: str):
         lines.append(f"**Задача:** {t.get('task')}  target: `{t.get('target')}`")
     lines.append("")
 
-    # отчёт как есть
     if data.get("report"):
         lines.append("## Отчёт")
         lines.append("```")
@@ -215,14 +221,12 @@ def download_run_markdown(run_id: str):
         lines.append("```")
         lines.append("")
 
-    # проблемы
     if data.get("problems"):
         lines.append("## Найденные проблемы")
         for key, val in data["problems"].items():
             lines.append(f"- **{key}**: {val}")
         lines.append("")
 
-    # рекомендации
     if data.get("recommendations"):
         lines.append("## Что сделать дальше")
         for r in data["recommendations"]:
