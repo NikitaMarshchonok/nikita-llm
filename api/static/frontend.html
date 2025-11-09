@@ -48,7 +48,6 @@
       padding: 16px 16px 20px;
       overflow: hidden;
     }
-    /* левая колонка и центр */
     .left-panel {
       width: 260px;
       background: var(--card);
@@ -142,7 +141,7 @@
       background: var(--card);
       border-radius: var(--radius);
       padding: 14px 16px;
-      height: 46%;
+      height: 40%; /* было 46, чуть уменьшил, чтобы влез блок рекомендаций */
       min-height: 220px;
       overflow-y: auto;
       white-space: pre-wrap;
@@ -150,10 +149,38 @@
       font-size: 12px;
       line-height: 1.5;
     }
+    /* NEW: блок рекомендаций */
+    .recs-box {
+      background: rgba(15, 23, 42, 0.3);
+      border: 1px solid rgba(148, 163, 184, 0.03);
+      border-radius: var(--radius);
+      padding: 10px 14px 12px;
+      min-height: 80px;
+      max-height: 110px;
+      overflow-y: auto;
+      font-size: 12px;
+    }
+    .recs-box h4 {
+      margin: 0 0 6px;
+      font-size: 12px;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .recs-box ul {
+      margin: 0;
+      padding-left: 16px;
+    }
+    .recs-box li {
+      margin-bottom: 4px;
+      color: var(--text-muted);
+    }
+
     .plots-row {
       display: flex;
       gap: 16px;
-      height: 54%;
+      height: 48%; /* было 54 */
       overflow-x: auto;
     }
     .plot-card {
@@ -175,7 +202,6 @@
       padding: 6px 8px 8px;
       color: var(--text-muted);
     }
-    /* right panel runs */
     .runs-title {
       font-size: 13px;
       margin-bottom: 8px;
@@ -246,11 +272,17 @@
       <small style="font-size:11px; color:var(--text-muted);">Файл отправляется на <code>/upload</code>, бэкенд делает EDA и модель.</small>
     </section>
 
-    <!-- центр: отчёт + графики -->
+    <!-- центр: отчёт + рекомендации + графики -->
     <section class="middle-panel">
       <div class="report-box" id="reportBox">
         Здесь появится отчёт ✨
       </div>
+
+      <!-- NEW: здесь будем показывать build_recommendations -->
+      <div class="recs-box" id="recs">
+        <!-- заполним из JS -->
+      </div>
+
       <div class="plots-row" id="plotsRow">
         <!-- сюда вставим графики -->
       </div>
@@ -272,6 +304,7 @@
     const statusEl = document.getElementById('status');
     const runsList = document.getElementById('runsList');
     const uploadBtn = document.getElementById('uploadBtn');
+    const recsBox = document.getElementById('recs'); // NEW
 
     let currentRunId = null;
 
@@ -310,9 +343,9 @@
         currentRunId = data.run_id;
 
         renderReport(data);
+        renderRecommendations(data);  // NEW
         renderPlots(data);
 
-        // обновим список запусков
         loadRuns();
 
       } catch (err) {
@@ -324,12 +357,10 @@
     }
 
     function renderReport(data) {
-      // если бэкенд отдаёт report — используем
       if (data.report) {
         reportBox.textContent = data.report;
         return;
       }
-      // иначе соберём что-то из полей
       let txt = '📁 ' + (data.filename || '') + '\n';
       if (data.eda?.shape) {
         txt += `📊 ${data.eda.shape[0]} строк x ${data.eda.shape[1]} колонок\n`;
@@ -352,10 +383,29 @@
       reportBox.textContent = txt;
     }
 
+    // NEW: показываем список рекомендаций, если пришли
+    function renderRecommendations(data) {
+      recsBox.innerHTML = '';
+      const recs = data.recommendations;
+      if (!recs || !Array.isArray(recs) || recs.length === 0) {
+        recsBox.innerHTML = '<span style="color:var(--text-muted);">Пока подсказок нет.</span>';
+        return;
+      }
+      const h = document.createElement('h4');
+      h.innerHTML = 'Что сделать дальше:';
+      const ul = document.createElement('ul');
+      recs.forEach((r) => {
+        const li = document.createElement('li');
+        li.textContent = r;
+        ul.appendChild(li);
+      });
+      recsBox.appendChild(h);
+      recsBox.appendChild(ul);
+    }
+
     function renderPlots(data) {
       plotsRow.innerHTML = '';
       if (!data.plots || !Array.isArray(data.plots) || data.plots.length === 0) {
-        // ничего не рисуем
         return;
       }
       data.plots.forEach(p => {
@@ -405,8 +455,8 @@
         const data = await resp.json();
         currentRunId = runId;
         renderReport(data);
+        renderRecommendations(data); // NEW
         renderPlots(data);
-        // подсветим активный
         Array.from(runsList.children).forEach(ch => {
           ch.classList.toggle('active', ch.textContent.includes(runId));
         });
@@ -415,7 +465,6 @@
       }
     }
 
-    // подгружаем список при входе
     loadRuns();
   </script>
 </body>

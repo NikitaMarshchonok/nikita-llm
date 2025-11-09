@@ -8,7 +8,9 @@ import uuid
 import base64
 from io import BytesIO
 from typing import Optional, Literal
-
+import numpy as np
+import pandas as pd
+import re
 import numpy as np
 import pandas as pd
 
@@ -29,14 +31,30 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------
 # 1. EDA (расширенный)
 # ---------------------------------------------------------------------
-def basic_eda(df: pd.DataFrame, target: str | None = None) -> dict:
+def basic_eda(df: pd.DataFrame) -> dict:
+    """
+    Расширенный EDA:
+    - форма
+    - типы
+    - пропуски (кол-во и доля)
+    - базовые статистики по числовым
+    - константные и почти константные признаки
+    - пары с высокой корреляцией
+    """
     eda: dict = {
         "shape": list(df.shape),
         "dtypes": {c: str(df[c].dtype) for c in df.columns},
-        "nulls": {c: int(df[c].isna().sum()) for c in df.columns},
     }
 
-    # числовая статистика
+    # пропуски
+    null_counts = {c: int(df[c].isna().sum()) for c in df.columns}
+    null_frac = {
+        c: float(df[c].isna().mean()) for c in df.columns
+    }
+    eda["nulls"] = null_counts
+    eda["null_fractions"] = null_frac
+
+    # базовые stats
     numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
     stats = {}
     for c in numeric_cols[:30]:
@@ -49,44 +67,97 @@ def basic_eda(df: pd.DataFrame, target: str | None = None) -> dict:
         }
     eda["numeric_stats"] = stats
 
-    problems: list[str] = []
+    # константные / почти константные
+    constant_features = []
+    quasi_constant_features = []
+    for c in df.columns:
+        uniq = df[c].nunique(dropna=True)
+        if uniq <= 1:
+            constant_features.append(c)
+        else:
+            # доля самого частого значения
+            top_frac = float(df[c].value_counts(normalize=True, dropna=False).iloc[0])
+            if top_frac > 0.98:
+                quasi_constant_features.append(c)
+    eda["constant_features"] = constant_features
+    eda["quasi_constant_features"] = quasi_constant_features
 
-    # 1) константы
-    constant_cols = [c for c in df.columns if df[c].nunique(dropna=False) <= 1]
-    if constant_cols:
-        eda["constant_columns"] = constant_cols
-        problems.append(f"Константные колонки: {', '.join(constant_cols[:5])}")
+    # пары с высокой корреляцией (только числовые)
+    high_corr_pairs = []
+    if len(numeric_cols) >= 2:
+        corr = df[numeric_cols].corr().abs()
+        # только верхний треугольник
+        for i, c1 in enumerate(numeric_cols):
+            for j in range(i + 1, len(numeric_cols)):
+                c2 = numeric_cols[j]
+                val = float(corr.loc[c1, c2])
+                if val >= 0.9:
+                    high_corr_pairs.append(
+                        {"feature_1": c1, "feature_2": c2, "corr": val}
+                    )
+    eda["high_corr_pairs"] = high_corr_pairs
 
-    # 2) очень широкие категориальные
-    cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
-    high_cardinality = [c for c in cat_cols if df[c].nunique() > 200]
-    if high_cardinality:
-        eda["high_cardinality"] = {c: int(df[c].nunique()) for c in high_cardinality}
-        problems.append("Есть категориальные с >200 уникальных значений — их лучше кодировать аккуратно.")
-
-    # 3) дисбаланс таргета (если есть)
-    if target is not None and target in df.columns:
-        tgt_ser = df[target]
-        if tgt_ser.dtype == "object" or tgt_ser.nunique() <= 30:
-            vc = tgt_ser.value_counts(normalize=True)
-            eda["target_distribution"] = vc.round(3).to_dict()
-            if vc.iloc[0] > 0.85:
-                problems.append(f"Сильный дисбаланс таргета: класс '{vc.index[0]}' = {vc.iloc[0]:.2f}")
-
-    # 4) возможная утечка (для регрессии: фичи сильно коррелируют с таргетом)
-    if target is not None and target in df.columns and df[target].dtype != "object":
-        num_df = df.select_dtypes(include=["number"])
-        if target in num_df.columns and num_df.shape[1] > 1:
-            corr = num_df.corr()[target].drop(labels=[target]).abs().sort_values(ascending=False)
-            leak_like = corr[corr > 0.95]
-            if not leak_like.empty:
-                eda["leak_candidates"] = leak_like.to_dict()
-                problems.append("Есть признаки с корреляцией >0.95 с таргетом — возможная утечка.")
-
-    eda["problems"] = problems
     return eda
 
 
+def build_recommendations(
+    eda: dict,
+    task: dict,
+    model: dict | None = None,
+) -> list[str]:
+    """
+    На основе EDA/задачи/модели выдаём список рекомендаций.
+    Это то, что мы покажем в UI справа.
+    """
+    recs: list[str] = []
+
+    # пропуски
+    null_fracs = eda.get("null_fractions", {})
+    big_nulls = [c for c, f in null_fracs.items() if f > 0.3]
+    if big_nulls:
+        recs.append(
+            f"Высокая доля пропусков в колонках: {', '.join(big_nulls)} — стоит либо имPUTировать, либо удалить."
+        )
+
+    # константы
+    consts = eda.get("constant_features", [])
+    if consts:
+        recs.append(
+            f"Константные признаки: {', '.join(consts)} — их можно удалить без потери качества."
+        )
+
+    quasi = eda.get("quasi_constant_features", [])
+    if quasi:
+        recs.append(
+            f"Почти константные признаки: {', '.join(quasi)} — стоит проверить, действительно ли они полезны."
+        )
+
+    # высокая корреляция
+    high_corr = eda.get("high_corr_pairs", [])
+    if high_corr:
+        top_pairs = ", ".join([f"{p['feature_1']}/{p['feature_2']} ({p['corr']:.2f})" for p in high_corr[:5]])
+        recs.append(
+            f"Есть сильно коррелирующие пары признаков: {top_pairs} — можно сделать отбор признаков или regularization."
+        )
+
+    # про задачу
+    if task.get("task") == "classification" and task.get("target"):
+        # если мы знаем таргет — можно посчитать дисбаланс
+        # (тут лучше считать в api, где есть сам df, но сделаем простое правило)
+        recs.append(
+            "Для классификации стоит проверить дисбаланс классов и при необходимости использовать class_weight/oversampling."
+        )
+
+    if model:
+        if "accuracy" in model and model["accuracy"] < 0.7:
+            recs.append("Точность ниже 0.7 — попробуй более мощную модель или лучшее препроцессирование.")
+        if "rmse" in model:
+            recs.append("Для регрессии можно попробовать логарифмировать таргет, если распределение с хвостом.")
+
+    if not recs:
+        recs.append("Структура данных выглядит ок, можно двигаться к фиче-инжинирингу и модели.")
+
+    return recs
 # ---------------------------------------------------------------------
 # 2. угадывание таргета и задачи
 # ---------------------------------------------------------------------
@@ -412,3 +483,79 @@ def save_run(run_data: dict, model_pipeline) -> str:
         joblib.dump(model_pipeline, os.path.join(run_dir, "model.joblib"))
 
     return run_id
+
+
+def analyze_dataset(df: pd.DataFrame, eda: dict, task: dict) -> dict:
+    """
+    Вычисляем диагностическую инфу: константы, квази-константы, корреляции,
+    дисбаланс (если классификация), NaN в таргете и т.п.
+    Это отдаём в API, чтобы фронт мог подсветить.
+    """
+    problems: dict[str, object] = {}
+
+    # 1) константы и почти константы
+    constant_cols = []
+    quasi_constant_cols = []
+    for col in df.columns:
+        nunique = df[col].nunique(dropna=True)
+        if nunique <= 1:
+            constant_cols.append(col)
+        elif nunique <= max(3, int(0.01 * len(df))):
+            quasi_constant_cols.append(col)
+    if constant_cols:
+        problems["constant_features"] = constant_cols
+    if quasi_constant_cols:
+        problems["quasi_constant_features"] = quasi_constant_cols
+
+    # 2) высокая корреляция по числовым
+    num_df = df.select_dtypes(include=["number"])
+    high_corr_pairs = []
+    if num_df.shape[1] >= 2:
+        corr = num_df.corr().abs()
+        cols = corr.columns.tolist()
+        for i in range(len(cols)):
+            for j in range(i + 1, len(cols)):
+                if corr.iloc[i, j] >= 0.9:  # порог можно крутить
+                    high_corr_pairs.append((cols[i], cols[j], float(corr.iloc[i, j])))
+    if high_corr_pairs:
+        problems["high_corr_pairs"] = high_corr_pairs
+
+    # 3) пропуски (в процентах)
+    null_perc = (df.isna().sum() / len(df) * 100).sort_values(ascending=False)
+    high_nulls = null_perc[null_perc > 30].to_dict()  # >30% считаем много
+    if high_nulls:
+        problems["high_null_features"] = {k: float(v) for k, v in high_nulls.items()}
+
+    # 4) NaN в таргете
+    target = task.get("target")
+    if target and target in df.columns:
+        n_nan_target = int(df[target].isna().sum())
+        if n_nan_target > 0:
+            problems["target_has_nan"] = {"column": target, "nan_count": n_nan_target}
+
+    # 5) дисбаланс классов
+    if task.get("task") == "classification" and target and target in df.columns:
+        vc = df[target].value_counts(dropna=False)
+        if len(vc) >= 2:
+            max_c = int(vc.iloc[0])
+            min_c = int(vc.iloc[-1])
+            ratio = max_c / max(1, min_c)
+            if ratio >= 5:  # дисбаланс
+                problems["class_imbalance"] = {
+                    "max_class": vc.index[0],
+                    "max_count": max_c,
+                    "min_class": vc.index[-1],
+                    "min_count": min_c,
+                    "ratio": float(ratio),
+                }
+
+    # 6) очень много категорий
+    high_cardinality = []
+    for col in df.select_dtypes(include=["object"]).columns:
+        nunique = df[col].nunique(dropna=True)
+        if nunique > 200:  # многа букаф
+            high_cardinality.append({"column": col, "n_unique": int(nunique)})
+    if high_cardinality:
+        problems["high_cardinality"] = high_cardinality
+
+    return problems

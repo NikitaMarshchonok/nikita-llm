@@ -15,7 +15,8 @@ from agent.tools import (
     detect_task,
     train_baseline,
     build_report,
-    make_plots_base64,  # добавили
+    make_plots_base64,
+    build_recommendations,   # <- импортим
 )
 
 app = FastAPI(
@@ -72,7 +73,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 @app.get("/ui")
 def ui():
-    # теперь точно туда, где лежит наш фронт
     return FileResponse(os.path.join("api", "static", "frontend.html"))
 
 
@@ -95,7 +95,7 @@ async def upload_dataset(
         df = read_csv_safely(contents)
         df = normalize_columns(df)
 
-        # 2) если пользователь прислал target — тоже нормализуем
+        # 2) нормализуем target, если прислали
         if target is not None:
             target = (
                 target.strip()
@@ -108,10 +108,10 @@ async def upload_dataset(
         # 3) EDA
         eda = basic_eda(df)
 
-        # 4) задача
+        # 4) определяем задачу
         task = detect_task(df, target=target)
 
-        # 5) базовая модель (без return_model — в твоём tools этого нет)
+        # 5) пробуем обучить модель
         model_res = None
         if task["task"] != "eda" and task["target"]:
             model_res = train_baseline(
@@ -120,13 +120,14 @@ async def upload_dataset(
                 task["task"],
             )
 
-        # 6) отчёт
+        # 6) отчёт и графики
         report_text = build_report(df, eda, task, model_res)
-
-        # 7) графики
         plots = make_plots_base64(df)
 
-        # 8) сохраняем запуск в память
+        # 7) рекомендации — ВОТ ЭТОГО НЕ ХВАТАЛО
+        recs = build_recommendations(eda, task, model_res)
+
+        # 8) сохраняем запуск
         run_id = f"run_{uuid4().hex[:8]}"
         RUNS[run_id] = {
             "filename": file.filename,
@@ -135,6 +136,7 @@ async def upload_dataset(
             "model": model_res,
             "report": report_text,
             "plots": plots,
+            "recommendations": recs,
             "columns": list(df.columns),
         }
 
@@ -147,6 +149,7 @@ async def upload_dataset(
                 "model": model_res,
                 "report": report_text,
                 "plots": plots,
+                "recommendations": recs,
             }
         )
 
@@ -174,7 +177,6 @@ async def upload_dataset(
 def get_run(run_id: str):
     if run_id not in RUNS:
         raise HTTPException(status_code=404, detail="run_id not found")
-    # тут уже нет pipeline, так что просто отдаём
     return RUNS[run_id]
 
 
