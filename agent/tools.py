@@ -348,26 +348,34 @@ def build_report(df: pd.DataFrame, eda: dict, task: dict, model: dict | None) ->
 # ---------------------------------------------------------------------
 def analyze_dataset(df: pd.DataFrame, eda: dict, task: dict) -> dict:
     """
-    Вычисляем диагностическую инфу: константы, квази-константы, корреляции,
-    дисбаланс, NaN в таргете, много пропусков, высокая кардинальность.
+    Собираем диагностическую инфу:
+    - константы / квази-константы
+    - высокая корреляция
+    - много пропусков
+    - NaN в таргете
+    - дисбаланс классов
+    - высокая кардинальность
     """
     problems: dict[str, object] = {}
 
-    # константы
+    # 1) константы и почти константы
     constant_cols = []
     quasi_constant_cols = []
     for col in df.columns:
         nunique = df[col].nunique(dropna=True)
         if nunique <= 1:
             constant_cols.append(col)
-        elif nunique <= max(3, int(0.01 * len(df))):
-            quasi_constant_cols.append(col)
+        else:
+            top_frac = df[col].value_counts(normalize=True, dropna=False).iloc[0]
+            if top_frac > 0.98:
+                quasi_constant_cols.append(col)
+
     if constant_cols:
         problems["constant_features"] = constant_cols
     if quasi_constant_cols:
         problems["quasi_constant_features"] = quasi_constant_cols
 
-    # высокая корреляция
+    # 2) высокая корреляция
     num_df = df.select_dtypes(include=["number"])
     high_corr_pairs = []
     if num_df.shape[1] >= 2:
@@ -375,26 +383,30 @@ def analyze_dataset(df: pd.DataFrame, eda: dict, task: dict) -> dict:
         cols = corr.columns.tolist()
         for i in range(len(cols)):
             for j in range(i + 1, len(cols)):
-                val = float(corr.iloc[i, j])
-                if val >= 0.9:
-                    high_corr_pairs.append((cols[i], cols[j], val))
+                cval = float(corr.iloc[i, j])
+                if cval >= 0.9:
+                    high_corr_pairs.append((cols[i], cols[j], cval))
     if high_corr_pairs:
         problems["high_corr_pairs"] = high_corr_pairs
 
-    # много пропусков
-    null_perc = (df.isna().sum() / len(df) * 100).sort_values(ascending=False)
-    high_nulls = null_perc[null_perc > 30].to_dict()
+    # 3) признаки с большим % пропусков
+    null_perc = (df.isna().sum() / len(df) * 100)
+    high_nulls = {col: float(round(p, 1)) for col, p in null_perc.items() if p >= 30.0}
     if high_nulls:
-        problems["high_null_features"] = {k: float(v) for k, v in high_nulls.items()}
+        problems["high_null_features"] = high_nulls
 
-    # NaN в таргете
+    # 4) NaN в таргете
     target = task.get("target")
     if target and target in df.columns:
-        n_nan_target = int(df[target].isna().sum())
-        if n_nan_target > 0:
-            problems["target_has_nan"] = {"column": target, "nan_count": n_nan_target}
+        nan_cnt = int(df[target].isna().sum())
+        if nan_cnt > 0:
+            problems["target_has_nan"] = {
+                "column": target,
+                "nan_count": nan_cnt,
+                "share": float(round(nan_cnt / len(df) * 100, 1)),
+            }
 
-    # дисбаланс классов
+    # 5) дисбаланс классов
     if task.get("task") == "classification" and target and target in df.columns:
         vc = df[target].value_counts(dropna=False)
         if len(vc) >= 2:
@@ -407,15 +419,17 @@ def analyze_dataset(df: pd.DataFrame, eda: dict, task: dict) -> dict:
                     "max_count": max_c,
                     "min_class": vc.index[-1],
                     "min_count": min_c,
-                    "ratio": float(ratio),
+                    "ratio": float(round(ratio, 1)),
                 }
 
-    # высокая кардинальность
+    # 6) высокая кардинальность категориальных
     high_cardinality = []
     for col in df.select_dtypes(include=["object"]).columns:
         nunique = df[col].nunique(dropna=True)
         if nunique > 200:
-            high_cardinality.append({"column": col, "n_unique": int(nunique)})
+            high_cardinality.append(
+                {"column": col, "n_unique": int(nunique)}
+            )
     if high_cardinality:
         problems["high_cardinality"] = high_cardinality
 
@@ -431,83 +445,135 @@ def build_recommendations(
     task: dict,
     problems: dict,
     model: dict | None,
+    max_items: int = 6,
 ) -> list[str]:
-    recs: list[str] = []
+    """
+    На основе анализа собираем приоритезированный список рекомендаций.
+    Возвращаем список строк (чтобы фронт мог их просто показать).
+    """
+    rec_objs: list[dict] = []
 
-    # константы
-    consts = problems.get("constant_features") or []
-    if consts:
-        recs.append(
-            f"Почти константные признаки: {', '.join(consts[:8])} — стоит удалить или проверить, действительно ли они нужны."
-        )
-
-    quasi = problems.get("quasi_constant_features") or []
-    if quasi:
-        recs.append(
-            f"Есть почти константные признаки: {', '.join(quasi[:8])} — можно исключить перед моделированием."
-        )
-
-    # корреляции
-    corr_pairs = problems.get("high_corr_pairs") or []
-    if corr_pairs:
-        short = [f"{a}↔{b} ({c:.2f})" for a, b, c in corr_pairs[:6]]
-        recs.append(
-            "Есть сильно коррелирующие пары признаков: "
-            + ", ".join(short)
-            + " — можно сделать отбор признаков или регуляризацию."
-        )
-
-    # пропуски
-    high_nulls = problems.get("high_null_features") or {}
-    if high_nulls:
-        show = [f"{k} ({v:.1f}%)" for k, v in list(high_nulls.items())[:6]]
-        recs.append(
-            "Есть признаки с большим числом пропусков: "
-            + ", ".join(show)
-            + " — заполни/удали/сделай отдельный флаг."
-        )
-
-    # NaN в таргете
+    # 1. критичные штуки
+    # NaN в target
     if problems.get("target_has_nan"):
         info = problems["target_has_nan"]
-        recs.append(
-            f"В целевой колонке {info['column']} есть пропуски ({info['nan_count']}) — нужно убрать их перед обучением."
-        )
+        rec_objs.append({
+            "priority": 100,
+            "text": (
+                f"В целевой колонке {info['column']} есть пропуски: {info['nan_count']} "
+                f"({info['share']}%). Перед обучением их нужно удалить или заимпутить."
+            ),
+        })
+
+    # много пропусков в признаках
+    high_nulls = problems.get("high_null_features") or {}
+    if high_nulls:
+        top = list(high_nulls.items())[:5]
+        pretty = ", ".join([f"{c} ({p}%)" for c, p in top])
+        rec_objs.append({
+            "priority": 90,
+            "text": (
+                f"Есть признаки с большим числом пропусков: {pretty}. "
+                "Рекомендуется удалить такие столбцы или настроить имputaцию."
+            ),
+        })
 
     # дисбаланс
     if problems.get("class_imbalance"):
         ci = problems["class_imbalance"]
-        recs.append(
-            f"Найден дисбаланс классов ({ci['max_class']}:{ci['min_class']} ≈ {ci['ratio']:.1f}). "
-            "Рекомендуется использовать class_weight, stratify или oversampling."
-        )
+        rec_objs.append({
+            "priority": 85,
+            "text": (
+                f"Обнаружен дисбаланс классов: {ci['max_class']}={ci['max_count']} vs "
+                f"{ci['min_class']}={ci['min_count']} (≈{ci['ratio']}:1). "
+                "Используй class_weight='balanced', stratify при train_test_split или oversampling."
+            ),
+        })
 
-    # высокая кардинальность
+    # 2. важные, но не критичные
+    consts = problems.get("constant_features") or []
+    if consts:
+        rec_objs.append({
+            "priority": 70,
+            "text": (
+                f"Константные признаки: {', '.join(consts[:8])}. "
+                "Их можно смело удалить — они не несут информации."
+            ),
+        })
+
+    quasi = problems.get("quasi_constant_features") or []
+    if quasi:
+        rec_objs.append({
+            "priority": 60,
+            "text": (
+                f"Почти константные признаки: {', '.join(quasi[:8])}. "
+                "Проверь их полезность перед моделированием."
+            ),
+        })
+
+    corr_pairs = problems.get("high_corr_pairs") or []
+    if corr_pairs:
+        short = [f"{a}↔{b} ({c:.2f})" for a, b, c in corr_pairs[:6]]
+        rec_objs.append({
+            "priority": 55,
+            "text": (
+                "Есть сильно коррелирующие пары признаков: "
+                + ", ".join(short)
+                + ". Можно сделать отбор признаков или регуляризацию, чтобы избежать переобучения."
+            ),
+        })
+
     high_card = problems.get("high_cardinality") or []
     if high_card:
-        cols = [f"{x['column']} ({x['n_unique']})" for x in high_card[:4]]
-        recs.append(
-            "Есть категориальные признаки с большим числом значений: "
-            + ", ".join(cols)
-            + " — лучше использовать CatBoost/target encoding/частотное кодирование."
-        )
+        show = [f"{x['column']} ({x['n_unique']})" for x in high_card[:3]]
+        rec_objs.append({
+            "priority": 50,
+            "text": (
+                "Категориальные признаки с очень большим числом значений: "
+                + ", ".join(show)
+                + ". Лучше использовать CatBoost/target encoding/частотное кодирование."
+            ),
+        })
 
-    # по задаче
-    if task.get("task") == "eda":
-        recs.append("Целевой признак не найден — можно явно указать target при загрузке.")
+    # 3. по задаче
+    if task.get("task") == "eda" or task.get("target") is None:
+        rec_objs.append({
+            "priority": 95,
+            "text": "Целевой признак не найден. Укажи его явно при загрузке (поле target).",
+        })
     elif task.get("task") == "regression":
-        recs.append("Для регрессии можно попробовать более сильные модели (CatBoostRegressor, LightGBM).")
+        rec_objs.append({
+            "priority": 40,
+            "text": "Это регрессия — можно попробовать более сильные модели (CatBoostRegressor, LightGBM) и лог-трансформацию таргета, если есть перекос.",
+        })
     elif task.get("task") == "classification":
-        recs.append("Для классификации можно посчитать ROC-AUC и PR-AUC, если это задача с дисбалансом.")
+        rec_objs.append({
+            "priority": 40,
+            "text": "Это классификация — кроме accuracy/f1 имеет смысл считать ROC-AUC и PR-AUC, особенно при дисбалансе.",
+        })
 
-    # по модели
+    # 4. по модели
     if model is None:
-        recs.append("Модель не обучалась — скорее всего, нет подходящего target.")
+        rec_objs.append({
+            "priority": 30,
+            "text": "Базовую модель не удалось обучить — нужно почистить данные или указать корректный target.",
+        })
     else:
-        if model.get("model_type") == "RandomForestClassifier":
-            recs.append("Текущая модель — RandomForestClassifier. Можно улучшить подбором гиперпараметров или бустингом.")
-        if model.get("model_type") == "RandomForestRegressor":
-            recs.append("Текущая модель — RandomForestRegressor. Можно улучшить CatBoost/LightGBM.")
+        mtype = model.get("model_type")
+        if mtype == "RandomForestClassifier":
+            rec_objs.append({
+                "priority": 35,
+                "text": "Текущая модель: RandomForestClassifier. Для повышения качества попробуй бустинг (CatBoost/XGBoost/LightGBM) и подбор гиперпараметров.",
+            })
+        elif mtype == "RandomForestRegressor":
+            rec_objs.append({
+                "priority": 35,
+                "text": "Текущая модель: RandomForestRegressor. Можно усилить модель градиентным бустингом и фичеинжинирингом.",
+            })
+
+    # 5. сортируем и обрезаем
+    rec_objs.sort(key=lambda x: x["priority"], reverse=True)
+    recs = [r["text"] for r in rec_objs[:max_items]]
 
     return recs
 

@@ -16,8 +16,8 @@ from agent.tools import (
     train_baseline,
     build_report,
     make_plots_base64,
-    analyze_dataset,       # 👈 добавили
-    build_recommendations, # 👈 уже было
+    analyze_dataset,       
+    build_recommendations, 
 )
 
 app = FastAPI(
@@ -112,30 +112,20 @@ async def upload_dataset(
         # 4) определяем задачу
         task = detect_task(df, target=target)
 
-        # 5) анализ проблем датасета (константы, корреляции, дисбаланс и т.п.)
+        # 5) прогоняем диагностику
         problems = analyze_dataset(df, eda, task)
 
         # 6) пробуем обучить модель
         model_res = None
         if task["task"] != "eda" and task["target"]:
-            model_res = train_baseline(
-                df,
-                task["target"],
-                task["task"],
-            )
+            model_res = train_baseline(df, task["target"], task["task"])
 
         # 7) отчёт и графики
         report_text = build_report(df, eda, task, model_res)
         plots = make_plots_base64(df)
 
-        # 8) рекомендации — теперь с правильной сигнатурой
-        recs = build_recommendations(
-            df=df,
-            eda=eda,
-            task=task,
-            problems=problems,
-            model=model_res,
-        )
+        # 8) рекомендации (теперь с problems)
+        recs = build_recommendations(df, eda, task, problems, model_res)
 
         # 9) сохраняем запуск
         run_id = f"run_{uuid4().hex[:8]}"
