@@ -342,6 +342,13 @@ def build_report(
     model: dict | None,
     problems: dict | None = None,
 ) -> str:
+    """
+    Человекочитаемый отчёт с секциями:
+    - Данные
+    - Проблемы
+    - Модель
+    (список «Что сделать дальше» теперь отдаём отдельным полем recommendations)
+    """
     problems = problems or {}
     lines: list[str] = []
 
@@ -416,7 +423,6 @@ def build_report(
     elif model is None:
         lines.append("• Модель не обучалась (невернулся результат).")
     elif model.get("model_type") == "skipped":
-        # наш новый ветвь
         lines.append("• Модель пропущена.")
         if model.get("reason"):
             lines.append("• Причина: " + model["reason"])
@@ -431,15 +437,6 @@ def build_report(
             lines.append(f"• ROC-AUC = {model['roc_auc']:.3f}")
         if "rmse" in model:
             lines.append(f"• RMSE = {model['rmse']:.3f}")
-
-    # --- ЧТО ДАЛЬШЕ ---
-    lines.append("")
-    lines.append("🪜 Что сделать дальше")
-    lines.append("• Посмотри на константы/корреляции и сократи фичи.")
-    if task.get("task") == "classification":
-        lines.append("• При дисбалансе используй class_weight='balanced' или oversampling.")
-    if task.get("task") == "regression":
-        lines.append("• Попробуй бустинг (CatBoost/LightGBM) для улучшения качества.")
 
     return "\n".join(lines)
 
@@ -545,6 +542,58 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
 
     return problems
 
+
+def evaluate_dataset_health(eda: dict, problems: dict) -> dict:
+    """
+    Делаем грубую оценку “здоровья” датасета по найденным проблемам.
+    Будем отдавать:
+      - score: 0..100
+      - level: "green"/"yellow"/"red"
+      - reasons: список строк
+    """
+    score = 100
+    reasons: list[str] = []
+
+    # много пропусков
+    if problems.get("high_null_features"):
+        score -= 15
+        reasons.append("много признаков с пропусками (>30%)")
+
+    # константы
+    if problems.get("constant_features"):
+        score -= 10
+        reasons.append("есть полностью константные признаки")
+
+    # сильная корреляция
+    if problems.get("high_corr_pairs"):
+        score -= 10
+        reasons.append("есть сильно коррелирующие признаки")
+
+    # дисбаланс
+    if problems.get("class_imbalance"):
+        score -= 20
+        reasons.append("сильный дисбаланс классов")
+
+    # высокая кардинальность
+    if problems.get("high_cardinality"):
+        score -= 5
+        reasons.append("категориальные с очень большим числом значений")
+
+    # не уходим ниже 30, чтобы не было “драма-квина”
+    score = max(30, min(100, score))
+
+    if score >= 80:
+        level = "green"
+    elif score >= 55:
+        level = "yellow"
+    else:
+        level = "red"
+
+    return {
+        "score": score,
+        "level": level,
+        "reasons": reasons,
+    }
 
 
 # ---------------------------------------------------------------------

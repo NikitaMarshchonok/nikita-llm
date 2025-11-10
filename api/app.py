@@ -18,6 +18,7 @@ from agent.tools import (
     make_plots_base64,
     analyze_dataset,        # <- у тебя в tools.py сигнатура (df, task)
     build_recommendations,  # <- у тебя сигнатура (eda, task, model, problems)
+    evaluate_dataset_health,
 )
 
 app = FastAPI(
@@ -106,6 +107,9 @@ async def upload_dataset(
         # 5. диагностика (ВАЖНО: у тебя analyze_dataset(df, task))
         problems = analyze_dataset(df, task)
 
+        # 5.1 оценка датасета
+        dataset_health = evaluate_dataset_health(eda, problems)
+
         # 6. модель (передадим проблемы, чтобы она могла учесть дисбаланс и id)
         model_res = None
         if task["task"] != "eda" and task["target"]:
@@ -133,6 +137,7 @@ async def upload_dataset(
             "eda": eda,
             "task": task,
             "problems": problems,
+            "dataset_health": dataset_health,
             "model": model_res,
             "report": report_text,
             "plots": plots,
@@ -147,6 +152,7 @@ async def upload_dataset(
                 "eda": eda,
                 "task": task,
                 "problems": problems,
+                "dataset_health": dataset_health,
                 "model": model_res,
                 "report": report_text,
                 "plots": plots,
