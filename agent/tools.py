@@ -194,26 +194,54 @@ def train_baseline(
     problems: dict | None = None,
     return_model: bool = False,
 ) -> Optional[dict]:
+    """
+    Обучаем очень базовую модель.
+    Если обучиться нельзя — возвращаем объект с model_type="skipped" и reason=...
+    Это удобнее, чем None, потому что фронт и отчёт могут сказать пользователю, что пошло не так.
+    """
     try:
+        # 1) таргета вообще нет
         if target not in df.columns:
-            return None
+            return {
+                "model_type": "skipped",
+                "reason": f"Колонка '{target}' не найдена в данных.",
+            }
 
+        # 2) приводим числа
         df = _coerce_numeric(df)
+
+        # 3) убираем строки без таргета
         df = df[~df[target].isna()].copy()
         if df.shape[0] < 20:
-            return None
+            return {
+                "model_type": "skipped",
+                "reason": "Мало строк после удаления NaN в таргете (нужно ≥ 20).",
+            }
 
         y = df[target]
         X = df.drop(columns=[target])
+
         if X.shape[1] == 0:
-            return None
+            return {
+                "model_type": "skipped",
+                "reason": "В датасете нет признаков кроме таргета.",
+            }
+
+        # выкинем из фич явные ID, если analyze_dataset их нашёл
+        if problems and problems.get("id_like"):
+            drop_cols = [c for c in problems["id_like"] if c in X.columns]
+            if drop_cols:
+                X = X.drop(columns=drop_cols)
 
         preprocessor = build_preprocessor(X)
 
-        # классификация
+        # ===== КЛАССИФИКАЦИЯ =====
         if task == "classification":
             if y.nunique() < 2:
-                return None
+                return {
+                    "model_type": "skipped",
+                    "reason": "В таргете только один класс — классификацию обучить нельзя.",
+                }
 
             rf_kwargs = dict(
                 n_estimators=200,
@@ -221,7 +249,7 @@ def train_baseline(
                 n_jobs=-1,
             )
 
-            # если нашли дисбаланс — включаем веса
+            # если нашли дисбаланс — сразу включим веса
             if problems and problems.get("class_imbalance"):
                 rf_kwargs["class_weight"] = "balanced"
 
@@ -251,7 +279,7 @@ def train_baseline(
                 "f1": f1,
             }
 
-            # если бинарка — считаем AUC
+            # бинарка → ROC-AUC
             if y_val.nunique() == 2:
                 try:
                     proba = pipe.predict_proba(X_val)[:, 1]
@@ -262,9 +290,10 @@ def train_baseline(
 
             if return_model:
                 res["pipeline"] = pipe
+
             return res
 
-        # регрессия
+        # ===== РЕГРЕССИЯ =====
         elif task == "regression":
             model = RandomForestRegressor(
                 n_estimators=200,
@@ -289,10 +318,18 @@ def train_baseline(
                 res["pipeline"] = pipe
             return res
 
-        return None
+        # если задача только EDA
+        return {
+            "model_type": "skipped",
+            "reason": "Задача не определена (только EDA).",
+        }
 
-    except Exception:
-        return None
+    except Exception as e:
+        # не роняем API
+        return {
+            "model_type": "skipped",
+            "reason": f"Во время обучения возникла ошибка: {e}",
+        }
 
 
 # ---------------------------------------------------------------------
@@ -308,6 +345,7 @@ def build_report(
     problems = problems or {}
     lines: list[str] = []
 
+    # --- ДАННЫЕ ---
     rows, cols = eda.get("shape", (len(df), df.shape[1]))
     lines.append("📦 Данные")
     lines.append(f"• Размер: {rows} строк × {cols} колонок.")
@@ -327,6 +365,7 @@ def build_report(
                 f"   - {name}: {st['mean']:.3f}/{st['std']:.3f}/{st['min']}/{st['max']}"
             )
 
+    # --- ПРОБЛЕМЫ ---
     lines.append("")
     lines.append("🧩 Проблемы в данных")
     any_problems = (
@@ -341,54 +380,49 @@ def build_report(
     if not any_problems:
         lines.append("• Явных проблем не найдено ✅")
     else:
-        consts = problems.get("constant_features") or []
-        if consts:
-            lines.append(
-                "• Константные признаки: " + ", ".join(consts[:8]) + " — можно удалить."
-            )
-        qconst = problems.get("quasi_constant_features") or []
-        if qconst:
-            lines.append(
-                "• Почти константные признаки: "
-                + ", ".join(qconst[:8])
-                + " — проверь их полезность."
-            )
-        corr_pairs = problems.get("high_corr_pairs") or []
-        if corr_pairs:
-            short = [f"{a}↔{b} ({c:.2f})" for a, b, c in corr_pairs[:6]]
-            lines.append(
-                "• Сильно коррелирующие пары: " + ", ".join(short) + " — возможен отбор фич."
-            )
-        high_nulls = problems.get("high_null_features") or {}
-        if high_nulls:
-            show = [f"{k} ({v:.1f}%)" for k, v in list(high_nulls.items())[:6]]
-            lines.append("• Много пропусков: " + ", ".join(show))
         if problems.get("target_has_nan"):
             info = problems["target_has_nan"]
             lines.append(
                 f"• В таргете {info['column']} есть {info['nan_count']} пропусков — убрать перед обучением."
             )
+        consts = problems.get("constant_features") or []
+        if consts:
+            lines.append("• Константные признаки: " + ", ".join(consts[:8]))
+        qconsts = problems.get("quasi_constant_features") or []
+        if qconsts:
+            lines.append("• Почти константные: " + ", ".join(qconsts[:8]))
+        corr_pairs = problems.get("high_corr_pairs") or []
+        if corr_pairs:
+            short = [f"{a}↔{b} ({c:.2f})" for a, b, c in corr_pairs[:6]]
+            lines.append("• Сильная корреляция: " + ", ".join(short))
+        high_nulls = problems.get("high_null_features") or {}
+        if high_nulls:
+            show = [f"{k} ({v:.1f}%)" for k, v in list(high_nulls.items())[:6]]
+            lines.append("• Много пропусков: " + ", ".join(show))
         if problems.get("class_imbalance"):
             ci = problems["class_imbalance"]
             lines.append(
-                f"• Дисбаланс классов: {ci['max_class']}:{ci['min_class']} ≈ {ci['ratio']:.1f} — используй class_weight/oversampling."
+                f"• Дисбаланс классов: {ci['max_class']}:{ci['min_class']} ≈ {ci['ratio']:.1f}"
             )
-        high_card = problems.get("high_cardinality") or []
-        if high_card:
-            cols_txt = [f"{x['column']} ({x['n_unique']})" for x in high_card[:4]]
-            lines.append(
-                "• Высокая кардинальность категориальных: " + ", ".join(cols_txt)
-            )
+        if problems.get("high_cardinality"):
+            cols = [f"{x['column']} ({x['n_unique']})" for x in problems["high_cardinality"][:4]]
+            lines.append("• Высокая кардинальность: " + ", ".join(cols))
 
+    # --- МОДЕЛЬ ---
     lines.append("")
     lines.append("🤖 Модель")
     if task.get("task") == "eda" or not task.get("target"):
         lines.append("• Целевой признак не найден — обучать нечего.")
     elif model is None:
-        lines.append("• Модель не обучалась — мало данных или один класс.")
+        lines.append("• Модель не обучалась (невернулся результат).")
+    elif model.get("model_type") == "skipped":
+        # наш новый ветвь
+        lines.append("• Модель пропущена.")
+        if model.get("reason"):
+            lines.append("• Причина: " + model["reason"])
     else:
         lines.append(f"• Задача: {task['task']} по колонке “{task['target']}”.")
-        lines.append(f"• Модель: {model['model_type']}.")
+        lines.append(f"• Модель: {model.get('model_type')}.")
         if "accuracy" in model:
             lines.append(f"• accuracy = {model['accuracy']:.3f}")
         if "f1" in model:
@@ -398,26 +432,27 @@ def build_report(
         if "rmse" in model:
             lines.append(f"• RMSE = {model['rmse']:.3f}")
 
+    # --- ЧТО ДАЛЬШЕ ---
     lines.append("")
     lines.append("🪜 Что сделать дальше")
     lines.append("• Посмотри на константы/корреляции и сократи фичи.")
     if task.get("task") == "classification":
-        lines.append("• Для дисбаланса — class_weight='balanced' или oversampling.")
-        lines.append("• Посчитай ROC-AUC/PR-AUC, если важен редкий класс.")
+        lines.append("• При дисбалансе используй class_weight='balanced' или oversampling.")
     if task.get("task") == "regression":
-        lines.append("• Попробуй бустинг (CatBoost/LightGBM) для улучшения RMSE.")
+        lines.append("• Попробуй бустинг (CatBoost/LightGBM) для улучшения качества.")
 
     return "\n".join(lines)
+
 
 
 # ---------------------------------------------------------------------
 # 6. анализ проблем (один вариант!)
 # ---------------------------------------------------------------------
-def analyze_dataset(df: pd.DataFrame, eda: dict, task: dict) -> dict:
+def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
     """
     Сигналы по датасету: константы, квазиконстанты, корреляции,
     много пропусков, дисбаланс, высокая кардинальность, ID-колонки.
-    eda мы сейчас не используем, но передаём для единообразия с app.py
+    Это единственная версия analyze_dataset — старую с (df, eda, task) нужно удалить.
     """
     problems: dict[str, object] = {}
 

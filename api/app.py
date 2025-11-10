@@ -16,8 +16,8 @@ from agent.tools import (
     train_baseline,
     build_report,
     make_plots_base64,
-    analyze_dataset,       # <- используем с df, eda, task
-    build_recommendations, # <- порядок аргументов как в tools.py
+    analyze_dataset,        # <- у тебя в tools.py сигнатура (df, task)
+    build_recommendations,  # <- у тебя сигнатура (eda, task, model, problems)
 )
 
 app = FastAPI(
@@ -83,11 +83,11 @@ async def upload_dataset(
     try:
         contents = await file.read()
 
-        # --- читаем и нормализуем ---
+        # 1. читаем и нормализуем
         df = read_csv_safely(contents)
         df = normalize_columns(df)
 
-        # --- нормализуем target ---
+        # 2. нормализуем target
         if target is not None:
             target = (
                 target.strip()
@@ -97,30 +97,35 @@ async def upload_dataset(
                 .replace("/", "_")
             )
 
-        # --- EDA ---
+        # 3. EDA
         eda = basic_eda(df)
 
-        # --- задача ---
+        # 4. определяем задачу
         task = detect_task(df, target=target)
 
-        # --- диагностика проблем (ВАЖНО: передаём df, eda, task) ---
-        problems = analyze_dataset(df, eda, task)
+        # 5. диагностика (ВАЖНО: у тебя analyze_dataset(df, task))
+        problems = analyze_dataset(df, task)
 
-        # --- модель ---
+        # 6. модель (передадим проблемы, чтобы она могла учесть дисбаланс и id)
         model_res = None
         if task["task"] != "eda" and task["target"]:
-            model_res = train_baseline(df, task["target"], task["task"])
+            model_res = train_baseline(
+                df,
+                task["target"],
+                task["task"],
+                problems=problems,   # <- добавили
+            )
 
-        # --- отчёт (передаём problems) ---
+        # 7. отчёт
         report_text = build_report(df, eda, task, model_res, problems)
 
-        # --- графики ---
+        # 8. графики
         plots = make_plots_base64(df)
 
-        # --- рекомендации (передаём df первым) ---
+        # 9. рекомендации (сигнатура: eda, task, model, problems)
         recs = build_recommendations(df, eda, task, problems, model_res)
 
-        # --- сохраняем запуск ---
+        # 10. сохраняем запуск
         run_id = f"run_{uuid4().hex[:8]}"
         RUNS[run_id] = {
             "run_id": run_id,
