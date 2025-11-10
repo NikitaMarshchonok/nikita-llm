@@ -19,6 +19,8 @@ from agent.tools import (
     analyze_dataset,        # <- у тебя в tools.py сигнатура (df, task)
     build_recommendations,  # <- у тебя сигнатура (eda, task, model, problems)
     evaluate_dataset_health,
+    build_next_actions,      
+    build_analysis_status,
 )
 
 app = FastAPI(
@@ -129,6 +131,10 @@ async def upload_dataset(
         # 9. рекомендации (сигнатура: eda, task, model, problems)
         recs = build_recommendations(df, eda, task, problems, model_res)
 
+        status = build_analysis_status(task, problems, model_res)
+        next_actions = build_next_actions(task, problems, model_res)
+
+
         # 10. сохраняем запуск
         run_id = f"run_{uuid4().hex[:8]}"
         RUNS[run_id] = {
@@ -138,6 +144,8 @@ async def upload_dataset(
             "task": task,
             "problems": problems,
             "dataset_health": dataset_health,
+            "status": status,            
+            "next_actions": next_actions,
             "model": model_res,
             "report": report_text,
             "plots": plots,
@@ -153,6 +161,8 @@ async def upload_dataset(
                 "task": task,
                 "problems": problems,
                 "dataset_health": dataset_health,
+                "status": status,            
+                "next_actions": next_actions,
                 "model": model_res,
                 "report": report_text,
                 "plots": plots,

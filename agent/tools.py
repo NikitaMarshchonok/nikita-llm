@@ -29,6 +29,15 @@ import joblib
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import math
+
+def _safe_float(x) -> float:
+    if x is None:
+        return 0.0
+    # pandas.isna тоже можно, но так короче
+    if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
+        return 0.0
+    return float(x)
 
 
 # ---------------------------------------------------------------------
@@ -50,10 +59,10 @@ def basic_eda(df: pd.DataFrame) -> dict:
     for c in numeric_cols[:30]:
         ser = df[c]
         stats[c] = {
-            "mean": float(ser.mean()),
-            "std": float(ser.std() or 0),
-            "min": float(ser.min()),
-            "max": float(ser.max()),
+            "mean": _safe_float(ser.mean()),
+            "std": _safe_float(ser.std()),
+            "min": _safe_float(ser.min()),
+            "max": _safe_float(ser.max()),
         }
     eda["numeric_stats"] = stats
 
@@ -449,7 +458,6 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
     """
     Сигналы по датасету: константы, квазиконстанты, корреляции,
     много пропусков, дисбаланс, высокая кардинальность, ID-колонки.
-    Это единственная версия analyze_dataset — старую с (df, eda, task) нужно удалить.
     """
     problems: dict[str, object] = {}
 
@@ -515,7 +523,7 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
         if n_nan_target > 0:
             problems["target_has_nan"] = {"column": target, "nan_count": n_nan_target}
 
-    # 5) дисбаланс классов
+    # 5) дисбаланс классов (ОТДЕЛЬНО от NaN!)
     if task.get("task") == "classification" and target and target in df.columns:
         vc = df[target].value_counts(dropna=False)
         if len(vc) >= 2:
@@ -524,11 +532,11 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
             ratio = max_c / max(1, min_c)
             if ratio >= 5:
                 problems["class_imbalance"] = {
-                    "max_class": vc.index[0],
+                    "max_class": str(vc.index[0]),
                     "max_count": max_c,
-                    "min_class": vc.index[-1],
+                    "min_class": str(vc.index[-1]),
                     "min_count": min_c,
-                    "ratio": float(ratio),
+                    "ratio": float(round(ratio, 1)),
                 }
 
     # 6) очень много категорий
@@ -541,6 +549,7 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
         problems["high_cardinality"] = high_cardinality
 
     return problems
+
 
 
 def evaluate_dataset_health(eda: dict, problems: dict) -> dict:
@@ -610,18 +619,21 @@ def build_recommendations(
 
     id_like = set(problems.get("id_like", []))
 
+    # константы
     consts = [c for c in (problems.get("constant_features") or []) if c not in id_like]
     if consts:
         recs.append(
             f"Есть полностью константные признаки: {', '.join(consts[:8])} — можно удалить перед моделированием."
         )
 
+    # почти константы
     quasi = [c for c in (problems.get("quasi_constant_features") or []) if c not in id_like]
     if quasi:
         recs.append(
             f"Есть почти константные признаки: {', '.join(quasi[:8])} — стоит проверить их пользу."
         )
 
+    # корреляции
     corr_pairs = problems.get("high_corr_pairs") or []
     if corr_pairs:
         short = []
@@ -636,6 +648,7 @@ def build_recommendations(
                 + " — можно сделать отбор признаков или регуляризацию."
             )
 
+    # много пропусков
     high_nulls = problems.get("high_null_features") or {}
     if high_nulls:
         show = [f"{k} ({v:.1f}%)" for k, v in list(high_nulls.items())[:6] if k not in id_like]
@@ -646,12 +659,14 @@ def build_recommendations(
                 + " — заполни/удали/сделай отдельный флаг."
             )
 
+    # NaN в таргете
     if problems.get("target_has_nan"):
         info = problems["target_has_nan"]
         recs.append(
             f"В целевой колонке {info['column']} есть пропуски ({info['nan_count']}) — нужно убрать их перед обучением."
         )
 
+    # дисбаланс (уже в новом формате!)
     if problems.get("class_imbalance"):
         ci = problems["class_imbalance"]
         recs.append(
@@ -659,6 +674,7 @@ def build_recommendations(
             "Используй class_weight='balanced', stratify при train_test_split или oversampling."
         )
 
+    # высокая кардинальность
     high_card = problems.get("high_cardinality") or []
     if high_card:
         cols = [f"{x['column']} ({x['n_unique']})" for x in high_card[:4] if x["column"] not in id_like]
@@ -669,6 +685,7 @@ def build_recommendations(
                 + " — лучше использовать CatBoost/target encoding/частотное кодирование."
             )
 
+    # по типу задачи
     if task.get("task") == "eda":
         recs.append("Целевой признак не найден — можно явно указать target при загрузке.")
     elif task.get("task") == "regression":
@@ -676,6 +693,7 @@ def build_recommendations(
     elif task.get("task") == "classification":
         recs.append("Для классификации имеет смысл посчитать ROC-AUC и PR-AUC, особенно при дисбалансе.")
 
+    # по модели
     if model is None:
         recs.append("Модель не обучалась — скорее всего, нет подходящего target или данных слишком мало.")
     else:
@@ -741,3 +759,99 @@ def save_run(run_data: dict, model_pipeline) -> str:
         joblib.dump(model_pipeline, os.path.join(run_dir, "model.joblib"))
 
     return run_id
+
+
+# ---------------------------------------------------------------------
+# 10. Краткий статус и next actions для UI
+# ---------------------------------------------------------------------
+def build_analysis_status(task: dict, problems: dict, model: dict | None) -> dict:
+    """
+    Возвращаем короткий статус, который можно показывать сверху в UI.
+    Сделан максимально безопасно: никаких KeyError.
+    """
+    problems = problems or {}
+    task = task or {}
+
+    status: dict = {
+        "task": task.get("task", "eda"),
+        "target": task.get("target"),
+        "dataset": "ok",      # ok | warning
+        "model": "ok",        # ok | not_trained | skipped
+        "notes": [],
+    }
+
+    # датасетовые предупреждения
+    if problems.get("target_has_nan"):
+        info = problems["target_has_nan"]
+        status["dataset"] = "warning"
+        status["notes"].append(
+            f"В таргете {info.get('column', '?')} есть {info.get('nan_count', 0)} пропусков"
+        )
+
+    if problems.get("high_null_features"):
+        status["dataset"] = "warning"
+        status["notes"].append("Есть признаки с >30% пропусков")
+
+    if problems.get("class_imbalance"):
+        ci = problems["class_imbalance"]
+        max_cls = ci.get("max_class", "?")
+        min_cls = ci.get("min_class", "?")
+        ratio = ci.get("ratio", "?")
+        status["dataset"] = "warning"
+        status["notes"].append(
+            f"Дисбаланс классов: {max_cls}:{min_cls} ≈ {ratio}"
+        )
+
+    # статус модели
+    if model is None:
+        status["model"] = "not_trained"
+        status["notes"].append("Модель не обучалась")
+    elif model.get("model_type") == "skipped":
+        status["model"] = "skipped"
+        if model.get("reason"):
+            status["notes"].append(f"Модель пропущена: {model['reason']}")
+    else:
+        status["model"] = "ok"
+
+    return status
+
+
+def build_next_actions(task: dict, problems: dict, model: dict | None) -> list[str]:
+    """
+    Короткий список “что сделать дальше”.
+    Это то, что ты можешь подсветить в UI отдельным блоком.
+    """
+    actions: list[str] = []
+    task = task or {}
+    problems = problems or {}
+
+    # 1. починить таргет
+    if problems.get("target_has_nan"):
+        actions.append("Очисти таргет от NaN (удали строки или заполни).")
+
+    # 2. признаки с большим % пропусков
+    if problems.get("high_null_features"):
+        actions.append("Обработай признаки с >30% пропусков: дроп/импутация/флаг.")
+
+    # 3. дисбаланс
+    if problems.get("class_imbalance") and task.get("task") == "classification":
+        actions.append("При обучении укажи class_weight='balanced' или сделай oversampling.")
+
+    # 4. высокую кардинальность
+    if problems.get("high_cardinality"):
+        actions.append("Для колонок с высокой кардинальностью используй CatBoost/target encoding.")
+
+    # 5. по задаче
+    if task.get("task") == "classification":
+        actions.append("Посчитай ROC-AUC и PR-AUC, если важны редкие классы.")
+    elif task.get("task") == "regression":
+        actions.append("Попробуй бустинг (CatBoost/LightGBM) для улучшения качества.")
+
+    # 6. по модели
+    if model is not None and model.get("model_type") == "RandomForestClassifier":
+        actions.append("Сделай подбор гиперпараметров или попробуй бустинг (XGBoost/LightGBM).")
+
+    if not actions:
+        actions.append("Датасет выглядит ок — можно двигаться к фичам/подбору модели.")
+
+    return actions
