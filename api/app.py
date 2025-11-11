@@ -20,6 +20,8 @@ from agent.tools import (
     evaluate_dataset_health,
     build_analysis_status,
     build_next_actions,
+    summarize_target,      # ← добавили
+    rank_problems,         # ← добавили
 )
 
 app = FastAPI(
@@ -84,9 +86,11 @@ async def upload_dataset(
     try:
         contents = await file.read()
 
+        # 1) читаем и нормализуем
         df = read_csv_safely(contents)
         df = normalize_columns(df)
 
+        # 2) нормализуем target, если пользователь его указал
         if target is not None:
             target = (
                 target.strip()
@@ -96,11 +100,25 @@ async def upload_dataset(
                 .replace("/", "_")
             )
 
+        # 3) EDA
         eda = basic_eda(df)
+
+        # 4) задача
         task = detect_task(df, target=target)
+
+        # 5) диагностика
         problems = analyze_dataset(df, task)
+
+        # 5.1) короткая сводка по таргету
+        target_summary = summarize_target(df, task)
+
+        # 5.2) ранжированный список проблем (high/medium/low)
+        problem_list = rank_problems(problems)
+
+        # 5.3) общая “здоровость” датасета
         dataset_health = evaluate_dataset_health(eda, problems)
 
+        # 6) базовая модель
         model_res = None
         if task["task"] != "eda" and task["target"]:
             model_res = train_baseline(
@@ -110,13 +128,20 @@ async def upload_dataset(
                 problems=problems,
             )
 
+        # 7) человекочитаемый отчёт
         report_text = build_report(df, eda, task, model_res, problems)
+
+        # 8) графики
         plots = make_plots_base64(df)
+
+        # 9) рекомендации
         recs = build_recommendations(df, eda, task, problems, model_res)
 
+        # 10) короткий статус + next actions
         status = build_analysis_status(task, problems, model_res)
         next_actions = build_next_actions(task, problems, model_res)
 
+        # 11) сохраняем в память
         run_id = f"run_{uuid4().hex[:8]}"
         RUNS[run_id] = {
             "run_id": run_id,
@@ -124,6 +149,8 @@ async def upload_dataset(
             "eda": eda,
             "task": task,
             "problems": problems,
+            "problem_list": problem_list,
+            "target_summary": target_summary,
             "dataset_health": dataset_health,
             "model": model_res,
             "report": report_text,
@@ -134,6 +161,7 @@ async def upload_dataset(
             "columns": list(df.columns),
         }
 
+        # 12) отдаём на фронт
         return JSONResponse(
             {
                 "run_id": run_id,
@@ -141,6 +169,8 @@ async def upload_dataset(
                 "eda": eda,
                 "task": task,
                 "problems": problems,
+                "problem_list": problem_list,
+                "target_summary": target_summary,
                 "dataset_health": dataset_health,
                 "model": model_res,
                 "report": report_text,

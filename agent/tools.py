@@ -793,3 +793,115 @@ def build_next_actions(task: dict, problems: dict, model: dict | None) -> list[s
         actions.append("Датасет выглядит ок — можно двигаться к фичам/подбору модели.")
 
     return actions
+
+
+
+
+def summarize_target(df: pd.DataFrame, task: dict) -> dict:
+    """
+    Короткая сводка по таргету:
+      - имя
+      - число уникальных значений
+      - топ-значения (до 10)
+      - share самого частого класса
+    Если таргета нет — вернём пустой dict.
+    """
+    target = task.get("target")
+    if not target or target not in df.columns:
+        return {}
+
+    ser = df[target]
+    # уберём NaN для подсчёта
+    ser_no_na = ser.dropna()
+
+    summary: dict = {
+        "target": target,
+        "n_unique": int(ser_no_na.nunique()),
+    }
+
+    # частоты
+    vc = ser_no_na.value_counts(dropna=False)
+    top_items = []
+    for val, cnt in vc.iloc[:10].items():
+        top_items.append({
+            "value": str(val),
+            "count": int(cnt),
+            "share": float(cnt / max(1, len(ser_no_na)))
+        })
+    summary["top_values"] = top_items
+
+    # доминирование одного класса
+    if len(vc) > 0:
+        most_common = vc.iloc[0]
+        summary["max_class_share"] = float(most_common / max(1, len(ser_no_na)))
+    else:
+        summary["max_class_share"] = 0.0
+
+    return summary
+
+
+def rank_problems(problems: dict) -> list[dict]:
+    """
+    Преобразуем наш dict проблем в список структур
+    c приоритетом. Это удобно фронту.
+    """
+    if not problems:
+        return []
+
+    ranked: list[dict] = []
+
+    # высокий приоритет
+    if problems.get("target_has_nan"):
+        ranked.append({
+            "level": "high",
+            "code": "target_has_nan",
+            "details": problems["target_has_nan"],
+            "message": "В таргете есть пропуски — их надо убрать перед обучением.",
+        })
+
+    if problems.get("class_imbalance"):
+        ranked.append({
+            "level": "high",
+            "code": "class_imbalance",
+            "details": problems["class_imbalance"],
+            "message": "Сильный дисбаланс классов — используй class_weight/oversampling.",
+        })
+
+    # средний
+    if problems.get("high_null_features"):
+        ranked.append({
+            "level": "medium",
+            "code": "high_null_features",
+            "details": problems["high_null_features"],
+            "message": "Есть признаки с >30% пропусков — заполни или удали.",
+        })
+
+    if problems.get("high_cardinality"):
+        ranked.append({
+            "level": "medium",
+            "code": "high_cardinality",
+            "details": problems["high_cardinality"],
+            "message": "Высокая кардинальность категорий — лучше CatBoost/target encoding.",
+        })
+
+    # низкий
+    if problems.get("constant_features") or problems.get("quasi_constant_features"):
+        ranked.append({
+            "level": "low",
+            "code": "low_variance",
+            "details": {
+                "constant": problems.get("constant_features"),
+                "quasi_constant": problems.get("quasi_constant_features"),
+            },
+            "message": "Есть константные / почти константные признаки — можно удалить.",
+        })
+
+    if problems.get("high_corr_pairs"):
+        ranked.append({
+            "level": "low",
+            "code": "high_corr_pairs",
+            "details": problems.get("high_corr_pairs"),
+            "message": "Есть сильно коррелирующие признаки — сделай отбор фич.",
+        })
+
+    return ranked
