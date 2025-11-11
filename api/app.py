@@ -20,8 +20,10 @@ from agent.tools import (
     evaluate_dataset_health,
     build_analysis_status,
     build_next_actions,
-    summarize_target,      # ← добавили
-    rank_problems,         # ← добавили
+    summarize_target,        # ← у тебя уже было
+    rank_problems,           # ← у тебя уже было
+    auto_feature_suggestions,    # ← добавили
+    extract_feature_importance,  # ← добавили
 )
 
 app = FastAPI(
@@ -30,6 +32,7 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# простое хранилище в памяти
 RUNS: dict[str, dict] = {}
 
 
@@ -118,15 +121,27 @@ async def upload_dataset(
         # 5.3) общая “здоровость” датасета
         dataset_health = evaluate_dataset_health(eda, problems)
 
+        # 5.4) идеи по новым фичам (это чистый список строк)
+        feature_suggestions = auto_feature_suggestions(df)
+
         # 6) базовая модель
         model_res = None
+        pipeline = None
+        feature_importance: list[dict] = []
         if task["task"] != "eda" and task["target"]:
+            # просим вернуть пайплайн
             model_res = train_baseline(
                 df,
                 task["target"],
                 task["task"],
                 problems=problems,
+                return_model=True,
             )
+
+            # вытаскиваем pipeline и не даём ему попасть в JSON
+            if model_res and "pipeline" in model_res:
+                pipeline = model_res.pop("pipeline")
+                feature_importance = extract_feature_importance(pipeline)
 
         # 7) человекочитаемый отчёт
         report_text = build_report(df, eda, task, model_res, problems)
@@ -158,10 +173,13 @@ async def upload_dataset(
             "recommendations": recs,
             "status": status,
             "next_actions": next_actions,
+            "feature_suggestions": feature_suggestions,
+            "feature_importance": feature_importance,
             "columns": list(df.columns),
+            "pipeline": pipeline,   # храним только в RAM, не в JSON
         }
 
-        # 12) отдаём на фронт
+        # 12) отдаём на фронт (без pipeline!)
         return JSONResponse(
             {
                 "run_id": run_id,
@@ -178,6 +196,8 @@ async def upload_dataset(
                 "recommendations": recs,
                 "status": status,
                 "next_actions": next_actions,
+                "feature_suggestions": feature_suggestions,
+                "feature_importance": feature_importance,
             }
         )
 

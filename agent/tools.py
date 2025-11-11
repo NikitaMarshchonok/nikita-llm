@@ -796,7 +796,6 @@ def build_next_actions(task: dict, problems: dict, model: dict | None) -> list[s
 
 
 
-
 def summarize_target(df: pd.DataFrame, task: dict) -> dict:
     """
     Короткая сводка по таргету:
@@ -905,3 +904,82 @@ def rank_problems(problems: dict) -> list[dict]:
         })
 
     return ranked
+
+
+
+def auto_feature_suggestions(df: pd.DataFrame) -> list[str]:
+    """
+    Очень простые подсказки, какие фичи можно докрутить.
+    Это не меняет df, это просто идеи для пользователя/агента.
+    """
+    suggestions: list[str] = []
+
+    # даты
+    for col in df.columns:
+        if "date" in col.lower() or "time" in col.lower() or "timestamp" in col.lower():
+            suggestions.append(
+                f"Из колонки {col} можно вынести year/month/day/dayofweek и, возможно, признак 'is_weekend'."
+            )
+
+    # большие категориальные
+    obj_cols = df.select_dtypes(include=["object"]).columns
+    for col in obj_cols:
+        nun = df[col].nunique(dropna=True)
+        if nun > 200:
+            suggestions.append(
+                f"Категориальная колонка {col} имеет много значений ({nun}) — стоит использовать target/frequency encoding или CatBoost."
+            )
+        elif 2 < nun <= 50:
+            suggestions.append(
+                f"Колонка {col} — аккуратная категориальная, можно one-hot (у тебя это уже есть в пайплайне)."
+            )
+
+    # числовые с пропусками
+    null_frac = df.isna().mean()
+    for col, frac in null_frac.items():
+        if frac > 0.0 and col not in obj_cols:
+            suggestions.append(
+                f"В числовой колонке {col} есть пропуски ({frac:.1%}) — можно добавить бинарный флаг 'is_{col}_missing'."
+            )
+
+    if not suggestions:
+        suggestions.append("Явных идей по новым фичам нет — можно переходить к отбору признаков/моделям.")
+
+    return suggestions
+
+
+def extract_feature_importance(pipeline) -> list[dict]:
+    """
+    Достаём топ-важные признаки из обученного pipeline, если модель умеет feature_importances_.
+    Возвращаем список словарей: {"feature": ..., "importance": ...}
+    Если достать нельзя — возвращаем пустой список.
+    """
+    try:
+        # у нас в pipeline шаги: ("preprocess", ...), ("model", RandomForest...)
+        model = pipeline.named_steps.get("model")
+        preprocess = pipeline.named_steps.get("preprocess")
+
+        if model is None or not hasattr(model, "feature_importances_"):
+            return []
+
+        importances = model.feature_importances_
+
+        # нужно восстановить имена фич после ColumnTransformer + OneHotEncoder
+        feature_names: list[str] = []
+        if hasattr(preprocess, "get_feature_names_out"):
+            feature_names = list(preprocess.get_feature_names_out())
+        else:
+            # fallback — просто пронумеруем
+            feature_names = [f"feature_{i}" for i in range(len(importances))]
+
+        items = []
+        for name, imp in zip(feature_names, importances):
+            items.append({"feature": str(name), "importance": float(imp)})
+
+        # отсортируем по важности
+        items.sort(key=lambda x: x["importance"], reverse=True)
+
+        # можно сразу ограничить топ-50
+        return items[:50]
+    except Exception:
+        return []
