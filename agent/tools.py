@@ -29,15 +29,6 @@ import joblib
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import math
-
-def _safe_float(x) -> float:
-    if x is None:
-        return 0.0
-    # pandas.isna тоже можно, но так короче
-    if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
-        return 0.0
-    return float(x)
 
 
 # ---------------------------------------------------------------------
@@ -49,24 +40,21 @@ def basic_eda(df: pd.DataFrame) -> dict:
         "dtypes": {c: str(df[c].dtype) for c in df.columns},
     }
 
-    # пропуски
     eda["nulls"] = {c: int(df[c].isna().sum()) for c in df.columns}
     eda["null_fractions"] = {c: float(df[c].isna().mean()) for c in df.columns}
 
-    # числовая статистика
     numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
     stats = {}
     for c in numeric_cols[:30]:
         ser = df[c]
         stats[c] = {
-            "mean": _safe_float(ser.mean()),
-            "std": _safe_float(ser.std()),
-            "min": _safe_float(ser.min()),
-            "max": _safe_float(ser.max()),
+            "mean": float(ser.mean()),
+            "std": float(ser.std() or 0),
+            "min": float(ser.min()),
+            "max": float(ser.max()),
         }
     eda["numeric_stats"] = stats
 
-    # константы / квази-константы
     constant_features = []
     quasi_constant_features = []
     for c in df.columns:
@@ -80,7 +68,6 @@ def basic_eda(df: pd.DataFrame) -> dict:
     eda["constant_features"] = constant_features
     eda["quasi_constant_features"] = quasi_constant_features
 
-    # сильно коррелирующие пары
     high_corr_pairs = []
     if len(numeric_cols) >= 2:
         corr = df[numeric_cols].corr().abs()
@@ -204,22 +191,21 @@ def train_baseline(
     return_model: bool = False,
 ) -> Optional[dict]:
     """
-    Обучаем очень базовую модель.
-    Если обучиться нельзя — возвращаем объект с model_type="skipped" и reason=...
-    Это удобнее, чем None, потому что фронт и отчёт могут сказать пользователю, что пошло не так.
+    Базовое обучение.
+    - учитываем дисбаланс
+    - выкидываем ID
+    - выкидываем супер-высокую кардинальность
+    - возвращаем причину, если не обучились
     """
     try:
-        # 1) таргета вообще нет
         if target not in df.columns:
             return {
                 "model_type": "skipped",
                 "reason": f"Колонка '{target}' не найдена в данных.",
             }
 
-        # 2) приводим числа
         df = _coerce_numeric(df)
 
-        # 3) убираем строки без таргета
         df = df[~df[target].isna()].copy()
         if df.shape[0] < 20:
             return {
@@ -230,17 +216,23 @@ def train_baseline(
         y = df[target]
         X = df.drop(columns=[target])
 
-        if X.shape[1] == 0:
-            return {
-                "model_type": "skipped",
-                "reason": "В датасете нет признаков кроме таргета.",
-            }
-
-        # выкинем из фич явные ID, если analyze_dataset их нашёл
+        # выкинем явные ID
         if problems and problems.get("id_like"):
             drop_cols = [c for c in problems["id_like"] if c in X.columns]
             if drop_cols:
                 X = X.drop(columns=drop_cols)
+
+        # выкинем очень высокую кардинальность
+        if problems and problems.get("high_cardinality"):
+            high_card_cols = [x["column"] for x in problems["high_cardinality"] if x["column"] in X.columns]
+            if high_card_cols:
+                X = X.drop(columns=high_card_cols)
+
+        if X.shape[1] == 0:
+            return {
+                "model_type": "skipped",
+                "reason": "После удаления ID и high-cardinality не осталось фич.",
+            }
 
         preprocessor = build_preprocessor(X)
 
@@ -258,7 +250,6 @@ def train_baseline(
                 n_jobs=-1,
             )
 
-            # если нашли дисбаланс — сразу включим веса
             if problems and problems.get("class_imbalance"):
                 rf_kwargs["class_weight"] = "balanced"
 
@@ -288,7 +279,6 @@ def train_baseline(
                 "f1": f1,
             }
 
-            # бинарка → ROC-AUC
             if y_val.nunique() == 2:
                 try:
                     proba = pipe.predict_proba(X_val)[:, 1]
@@ -327,14 +317,12 @@ def train_baseline(
                 res["pipeline"] = pipe
             return res
 
-        # если задача только EDA
         return {
             "model_type": "skipped",
             "reason": "Задача не определена (только EDA).",
         }
 
     except Exception as e:
-        # не роняем API
         return {
             "model_type": "skipped",
             "reason": f"Во время обучения возникла ошибка: {e}",
@@ -351,17 +339,9 @@ def build_report(
     model: dict | None,
     problems: dict | None = None,
 ) -> str:
-    """
-    Человекочитаемый отчёт с секциями:
-    - Данные
-    - Проблемы
-    - Модель
-    (список «Что сделать дальше» теперь отдаём отдельным полем recommendations)
-    """
     problems = problems or {}
     lines: list[str] = []
 
-    # --- ДАННЫЕ ---
     rows, cols = eda.get("shape", (len(df), df.shape[1]))
     lines.append("📦 Данные")
     lines.append(f"• Размер: {rows} строк × {cols} колонок.")
@@ -381,7 +361,6 @@ def build_report(
                 f"   - {name}: {st['mean']:.3f}/{st['std']:.3f}/{st['min']}/{st['max']}"
             )
 
-    # --- ПРОБЛЕМЫ ---
     lines.append("")
     lines.append("🧩 Проблемы в данных")
     any_problems = (
@@ -424,7 +403,6 @@ def build_report(
             cols = [f"{x['column']} ({x['n_unique']})" for x in problems["high_cardinality"][:4]]
             lines.append("• Высокая кардинальность: " + ", ".join(cols))
 
-    # --- МОДЕЛЬ ---
     lines.append("")
     lines.append("🤖 Модель")
     if task.get("task") == "eda" or not task.get("target"):
@@ -450,18 +428,13 @@ def build_report(
     return "\n".join(lines)
 
 
-
 # ---------------------------------------------------------------------
-# 6. анализ проблем (один вариант!)
+# 6. анализ проблем
 # ---------------------------------------------------------------------
 def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
-    """
-    Сигналы по датасету: константы, квазиконстанты, корреляции,
-    много пропусков, дисбаланс, высокая кардинальность, ID-колонки.
-    """
     problems: dict[str, object] = {}
 
-    # 0) детект ID / ключей
+    # ID / ключи
     id_like_cols: list[str] = []
     n_rows = len(df)
     for col in df.columns:
@@ -473,7 +446,7 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
             or col_l.endswith("_id")
             or col_l in ("index", "idx", "rk", "rank")
         )
-        value_looks_like_id = nunique > 0.9 * n_rows  # почти уникально
+        value_looks_like_id = nunique > 0.9 * n_rows
 
         if name_looks_like_id or value_looks_like_id:
             id_like_cols.append(col)
@@ -481,7 +454,7 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
     if id_like_cols:
         problems["id_like"] = id_like_cols
 
-    # 1) константы и почти константы
+    # константы
     constant_cols = []
     quasi_constant_cols = []
     for col in df.columns:
@@ -497,7 +470,7 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
     if quasi_constant_cols:
         problems["quasi_constant_features"] = quasi_constant_cols
 
-    # 2) высокая корреляция по числовым
+    # корреляции
     num_df = df.select_dtypes(include=["number"])
     high_corr_pairs = []
     if num_df.shape[1] >= 2:
@@ -510,20 +483,20 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
     if high_corr_pairs:
         problems["high_corr_pairs"] = high_corr_pairs
 
-    # 3) пропуски (в процентах)
+    # много пропусков
     null_perc = (df.isna().sum() / max(1, n_rows) * 100).sort_values(ascending=False)
     high_nulls = null_perc[null_perc > 30].to_dict()
     if high_nulls:
         problems["high_null_features"] = {k: float(v) for k, v in high_nulls.items()}
 
-    # 4) NaN в таргете
+    # NaN в таргете
     target = task.get("target")
     if target and target in df.columns:
         n_nan_target = int(df[target].isna().sum())
         if n_nan_target > 0:
             problems["target_has_nan"] = {"column": target, "nan_count": n_nan_target}
 
-    # 5) дисбаланс классов (ОТДЕЛЬНО от NaN!)
+    # дисбаланс КАК ОТДЕЛЬНЫЙ БЛОК (не вложенный!)
     if task.get("task") == "classification" and target and target in df.columns:
         vc = df[target].value_counts(dropna=False)
         if len(vc) >= 2:
@@ -532,14 +505,15 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
             ratio = max_c / max(1, min_c)
             if ratio >= 5:
                 problems["class_imbalance"] = {
+                    "n_classes": int(len(vc)),
                     "max_class": str(vc.index[0]),
                     "max_count": max_c,
                     "min_class": str(vc.index[-1]),
                     "min_count": min_c,
-                    "ratio": float(round(ratio, 1)),
+                    "ratio": float(ratio),
                 }
 
-    # 6) очень много категорий
+    # высокая кардинальность
     high_cardinality = []
     for col in df.select_dtypes(include=["object"]).columns:
         nunique = df[col].nunique(dropna=True)
@@ -551,44 +525,33 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
     return problems
 
 
-
+# ---------------------------------------------------------------------
+# 6.1 оценка здоровья датасета
+# ---------------------------------------------------------------------
 def evaluate_dataset_health(eda: dict, problems: dict) -> dict:
-    """
-    Делаем грубую оценку “здоровья” датасета по найденным проблемам.
-    Будем отдавать:
-      - score: 0..100
-      - level: "green"/"yellow"/"red"
-      - reasons: список строк
-    """
     score = 100
     reasons: list[str] = []
 
-    # много пропусков
     if problems.get("high_null_features"):
         score -= 15
         reasons.append("много признаков с пропусками (>30%)")
 
-    # константы
     if problems.get("constant_features"):
         score -= 10
         reasons.append("есть полностью константные признаки")
 
-    # сильная корреляция
     if problems.get("high_corr_pairs"):
         score -= 10
         reasons.append("есть сильно коррелирующие признаки")
 
-    # дисбаланс
     if problems.get("class_imbalance"):
         score -= 20
         reasons.append("сильный дисбаланс классов")
 
-    # высокая кардинальность
     if problems.get("high_cardinality"):
         score -= 5
         reasons.append("категориальные с очень большим числом значений")
 
-    # не уходим ниже 30, чтобы не было “драма-квина”
     score = max(30, min(100, score))
 
     if score >= 80:
@@ -606,7 +569,7 @@ def evaluate_dataset_health(eda: dict, problems: dict) -> dict:
 
 
 # ---------------------------------------------------------------------
-# 7. рекомендации (под сигнатуру из app.py)
+# 7. рекомендации
 # ---------------------------------------------------------------------
 def build_recommendations(
     df: pd.DataFrame,
@@ -619,21 +582,18 @@ def build_recommendations(
 
     id_like = set(problems.get("id_like", []))
 
-    # константы
     consts = [c for c in (problems.get("constant_features") or []) if c not in id_like]
     if consts:
         recs.append(
             f"Есть полностью константные признаки: {', '.join(consts[:8])} — можно удалить перед моделированием."
         )
 
-    # почти константы
     quasi = [c for c in (problems.get("quasi_constant_features") or []) if c not in id_like]
     if quasi:
         recs.append(
             f"Есть почти константные признаки: {', '.join(quasi[:8])} — стоит проверить их пользу."
         )
 
-    # корреляции
     corr_pairs = problems.get("high_corr_pairs") or []
     if corr_pairs:
         short = []
@@ -648,7 +608,6 @@ def build_recommendations(
                 + " — можно сделать отбор признаков или регуляризацию."
             )
 
-    # много пропусков
     high_nulls = problems.get("high_null_features") or {}
     if high_nulls:
         show = [f"{k} ({v:.1f}%)" for k, v in list(high_nulls.items())[:6] if k not in id_like]
@@ -659,14 +618,7 @@ def build_recommendations(
                 + " — заполни/удали/сделай отдельный флаг."
             )
 
-    # NaN в таргете
-    if problems.get("target_has_nan"):
-        info = problems["target_has_nan"]
-        recs.append(
-            f"В целевой колонке {info['column']} есть пропуски ({info['nan_count']}) — нужно убрать их перед обучением."
-        )
-
-    # дисбаланс (уже в новом формате!)
+    # дисбаланс — ВНЕ зависимости от target_has_nan
     if problems.get("class_imbalance"):
         ci = problems["class_imbalance"]
         recs.append(
@@ -674,7 +626,12 @@ def build_recommendations(
             "Используй class_weight='balanced', stratify при train_test_split или oversampling."
         )
 
-    # высокая кардинальность
+    if problems.get("target_has_nan"):
+        info = problems["target_has_nan"]
+        recs.append(
+            f"В целевой колонке {info['column']} есть пропуски ({info['nan_count']}) — нужно убрать их перед обучением."
+        )
+
     high_card = problems.get("high_cardinality") or []
     if high_card:
         cols = [f"{x['column']} ({x['n_unique']})" for x in high_card[:4] if x["column"] not in id_like]
@@ -685,7 +642,6 @@ def build_recommendations(
                 + " — лучше использовать CatBoost/target encoding/частотное кодирование."
             )
 
-    # по типу задачи
     if task.get("task") == "eda":
         recs.append("Целевой признак не найден — можно явно указать target при загрузке.")
     elif task.get("task") == "regression":
@@ -693,7 +649,6 @@ def build_recommendations(
     elif task.get("task") == "classification":
         recs.append("Для классификации имеет смысл посчитать ROC-AUC и PR-AUC, особенно при дисбалансе.")
 
-    # по модели
     if model is None:
         recs.append("Модель не обучалась — скорее всего, нет подходящего target или данных слишком мало.")
     else:
@@ -745,7 +700,7 @@ def make_plots_base64(df: pd.DataFrame) -> list[dict]:
 
 
 # ---------------------------------------------------------------------
-# 9. сохранение на диск (по желанию)
+# 9. сохранение на диск
 # ---------------------------------------------------------------------
 def save_run(run_data: dict, model_pipeline) -> str:
     run_id = str(uuid.uuid4())
@@ -762,25 +717,20 @@ def save_run(run_data: dict, model_pipeline) -> str:
 
 
 # ---------------------------------------------------------------------
-# 10. Краткий статус и next actions для UI
+# 10. Краткий статус и next actions
 # ---------------------------------------------------------------------
 def build_analysis_status(task: dict, problems: dict, model: dict | None) -> dict:
-    """
-    Возвращаем короткий статус, который можно показывать сверху в UI.
-    Сделан максимально безопасно: никаких KeyError.
-    """
     problems = problems or {}
     task = task or {}
 
     status: dict = {
         "task": task.get("task", "eda"),
         "target": task.get("target"),
-        "dataset": "ok",      # ok | warning
-        "model": "ok",        # ok | not_trained | skipped
+        "dataset": "ok",
+        "model": "ok",
         "notes": [],
     }
 
-    # датасетовые предупреждения
     if problems.get("target_has_nan"):
         info = problems["target_has_nan"]
         status["dataset"] = "warning"
@@ -792,17 +742,15 @@ def build_analysis_status(task: dict, problems: dict, model: dict | None) -> dic
         status["dataset"] = "warning"
         status["notes"].append("Есть признаки с >30% пропусков")
 
-    if problems.get("class_imbalance"):
-        ci = problems["class_imbalance"]
-        max_cls = ci.get("max_class", "?")
-        min_cls = ci.get("min_class", "?")
+    # поддерживаем и старые, и новые имена полей дисбаланса
+    ci = problems.get("class_imbalance")
+    if ci:
+        max_cls = ci.get("max_class") or ci.get("most_common_class") or "?"
+        min_cls = ci.get("min_class") or ci.get("rarest_class") or "?"
         ratio = ci.get("ratio", "?")
         status["dataset"] = "warning"
-        status["notes"].append(
-            f"Дисбаланс классов: {max_cls}:{min_cls} ≈ {ratio}"
-        )
+        status["notes"].append(f"Дисбаланс классов: {max_cls}:{min_cls} ≈ {ratio}")
 
-    # статус модели
     if model is None:
         status["model"] = "not_trained"
         status["notes"].append("Модель не обучалась")
@@ -817,37 +765,27 @@ def build_analysis_status(task: dict, problems: dict, model: dict | None) -> dic
 
 
 def build_next_actions(task: dict, problems: dict, model: dict | None) -> list[str]:
-    """
-    Короткий список “что сделать дальше”.
-    Это то, что ты можешь подсветить в UI отдельным блоком.
-    """
     actions: list[str] = []
     task = task or {}
     problems = problems or {}
 
-    # 1. починить таргет
     if problems.get("target_has_nan"):
         actions.append("Очисти таргет от NaN (удали строки или заполни).")
 
-    # 2. признаки с большим % пропусков
     if problems.get("high_null_features"):
         actions.append("Обработай признаки с >30% пропусков: дроп/импутация/флаг.")
 
-    # 3. дисбаланс
     if problems.get("class_imbalance") and task.get("task") == "classification":
         actions.append("При обучении укажи class_weight='balanced' или сделай oversampling.")
 
-    # 4. высокую кардинальность
     if problems.get("high_cardinality"):
         actions.append("Для колонок с высокой кардинальностью используй CatBoost/target encoding.")
 
-    # 5. по задаче
     if task.get("task") == "classification":
         actions.append("Посчитай ROC-AUC и PR-AUC, если важны редкие классы.")
     elif task.get("task") == "regression":
         actions.append("Попробуй бустинг (CatBoost/LightGBM) для улучшения качества.")
 
-    # 6. по модели
     if model is not None and model.get("model_type") == "RandomForestClassifier":
         actions.append("Сделай подбор гиперпараметров или попробуй бустинг (XGBoost/LightGBM).")
 

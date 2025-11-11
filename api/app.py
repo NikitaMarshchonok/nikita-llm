@@ -1,5 +1,4 @@
 # api/app.py
-
 from __future__ import annotations
 
 import os
@@ -16,11 +15,11 @@ from agent.tools import (
     train_baseline,
     build_report,
     make_plots_base64,
-    analyze_dataset,        # <- у тебя в tools.py сигнатура (df, task)
-    build_recommendations,  # <- у тебя сигнатура (eda, task, model, problems)
+    analyze_dataset,
+    build_recommendations,
     evaluate_dataset_health,
-    build_next_actions,      
     build_analysis_status,
+    build_next_actions,
 )
 
 app = FastAPI(
@@ -29,7 +28,6 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# простое хранилище в памяти
 RUNS: dict[str, dict] = {}
 
 
@@ -86,11 +84,9 @@ async def upload_dataset(
     try:
         contents = await file.read()
 
-        # 1. читаем и нормализуем
         df = read_csv_safely(contents)
         df = normalize_columns(df)
 
-        # 2. нормализуем target
         if target is not None:
             target = (
                 target.strip()
@@ -100,42 +96,27 @@ async def upload_dataset(
                 .replace("/", "_")
             )
 
-        # 3. EDA
         eda = basic_eda(df)
-
-        # 4. определяем задачу
         task = detect_task(df, target=target)
-
-        # 5. диагностика (ВАЖНО: у тебя analyze_dataset(df, task))
         problems = analyze_dataset(df, task)
-
-        # 5.1 оценка датасета
         dataset_health = evaluate_dataset_health(eda, problems)
 
-        # 6. модель (передадим проблемы, чтобы она могла учесть дисбаланс и id)
         model_res = None
         if task["task"] != "eda" and task["target"]:
             model_res = train_baseline(
                 df,
                 task["target"],
                 task["task"],
-                problems=problems,   # <- добавили
+                problems=problems,
             )
 
-        # 7. отчёт
         report_text = build_report(df, eda, task, model_res, problems)
-
-        # 8. графики
         plots = make_plots_base64(df)
-
-        # 9. рекомендации (сигнатура: eda, task, model, problems)
         recs = build_recommendations(df, eda, task, problems, model_res)
 
         status = build_analysis_status(task, problems, model_res)
         next_actions = build_next_actions(task, problems, model_res)
 
-
-        # 10. сохраняем запуск
         run_id = f"run_{uuid4().hex[:8]}"
         RUNS[run_id] = {
             "run_id": run_id,
@@ -144,12 +125,12 @@ async def upload_dataset(
             "task": task,
             "problems": problems,
             "dataset_health": dataset_health,
-            "status": status,            
-            "next_actions": next_actions,
             "model": model_res,
             "report": report_text,
             "plots": plots,
             "recommendations": recs,
+            "status": status,
+            "next_actions": next_actions,
             "columns": list(df.columns),
         }
 
@@ -161,12 +142,12 @@ async def upload_dataset(
                 "task": task,
                 "problems": problems,
                 "dataset_health": dataset_health,
-                "status": status,            
-                "next_actions": next_actions,
                 "model": model_res,
                 "report": report_text,
                 "plots": plots,
                 "recommendations": recs,
+                "status": status,
+                "next_actions": next_actions,
             }
         )
 
@@ -209,8 +190,6 @@ def list_runs():
         })
     return items
 
-
-# ===== экспорт =====
 
 @app.get("/runs/{run_id}/report")
 def get_run_report(run_id: str):
