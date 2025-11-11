@@ -190,71 +190,50 @@ def train_baseline(
     problems: dict | None = None,
     return_model: bool = False,
 ) -> Optional[dict]:
-    """
-    Базовое обучение.
-    - учитываем дисбаланс
-    - выкидываем ID
-    - выкидываем супер-высокую кардинальность
-    - возвращаем причину, если не обучились
-    """
     try:
         if target not in df.columns:
-            return {
-                "model_type": "skipped",
-                "reason": f"Колонка '{target}' не найдена в данных.",
-            }
+            return {"model_type": "skipped", "reason": f"Колонка '{target}' не найдена."}
 
-        df = _coerce_numeric(df)
+        problems = problems or {}
 
+        # 0. убираем строки без таргета
         df = df[~df[target].isna()].copy()
         if df.shape[0] < 20:
-            return {
-                "model_type": "skipped",
-                "reason": "Мало строк после удаления NaN в таргете (нужно ≥ 20).",
-            }
+            return {"model_type": "skipped", "reason": "Мало строк после удаления NaN в таргете."}
 
+        # 1. собираем, что будем дропать (id + константы)
+        drop_cols: list[str] = []
+        for c in problems.get("id_like", []) or []:
+            if c in df.columns and c != target:
+                drop_cols.append(c)
+        for c in problems.get("constant_features", []) or []:
+            if c in df.columns and c != target and c not in drop_cols:
+                drop_cols.append(c)
+
+        # 2. формируем X, y
+        X = df.drop(columns=[target] + drop_cols)
         y = df[target]
-        X = df.drop(columns=[target])
-
-        # выкинем явные ID
-        if problems and problems.get("id_like"):
-            drop_cols = [c for c in problems["id_like"] if c in X.columns]
-            if drop_cols:
-                X = X.drop(columns=drop_cols)
-
-        # выкинем очень высокую кардинальность
-        if problems and problems.get("high_cardinality"):
-            high_card_cols = [x["column"] for x in problems["high_cardinality"] if x["column"] in X.columns]
-            if high_card_cols:
-                X = X.drop(columns=high_card_cols)
 
         if X.shape[1] == 0:
-            return {
-                "model_type": "skipped",
-                "reason": "После удаления ID и high-cardinality не осталось фич.",
-            }
+            return {"model_type": "skipped", "reason": "После очистки не осталось признаков."}
 
         preprocessor = build_preprocessor(X)
 
-        # ===== КЛАССИФИКАЦИЯ =====
+        # ===== классификация =====
         if task == "classification":
             if y.nunique() < 2:
-                return {
-                    "model_type": "skipped",
-                    "reason": "В таргете только один класс — классификацию обучить нельзя.",
-                }
+                return {"model_type": "skipped", "reason": "В таргете один класс."}
 
-            rf_kwargs = dict(
-                n_estimators=200,
-                random_state=42,
-                n_jobs=-1,
-            )
+            rf_kwargs = dict(n_estimators=200, random_state=42, n_jobs=-1)
 
-            if problems and problems.get("class_imbalance"):
+            used_class_weight = False
+            if problems.get("class_imbalance"):
                 rf_kwargs["class_weight"] = "balanced"
+                used_class_weight = True
 
             model = RandomForestClassifier(**rf_kwargs)
 
+            # можно ли стратифицировать
             counts = y.value_counts(dropna=False)
             can_stratify = (counts >= 2).all()
 
@@ -263,7 +242,7 @@ def train_baseline(
                 y,
                 test_size=0.2,
                 random_state=42,
-                stratify=y if (y.nunique() < 50 and can_stratify) else None,
+                stratify=y if can_stratify else None,
             )
 
             pipe = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
@@ -277,13 +256,18 @@ def train_baseline(
                 "model_type": "RandomForestClassifier",
                 "accuracy": acc,
                 "f1": f1,
+                "training_log": {
+                    "dropped_columns": drop_cols,
+                    "used_class_weight": used_class_weight,
+                    "stratified_split": bool(can_stratify),
+                },
             }
 
+            # бинарка → ROC-AUC
             if y_val.nunique() == 2:
                 try:
                     proba = pipe.predict_proba(X_val)[:, 1]
-                    auc = float(roc_auc_score(y_val, proba))
-                    res["roc_auc"] = auc
+                    res["roc_auc"] = float(roc_auc_score(y_val, proba))
                 except Exception:
                     pass
 
@@ -292,13 +276,9 @@ def train_baseline(
 
             return res
 
-        # ===== РЕГРЕССИЯ =====
+        # ===== регрессия =====
         elif task == "regression":
-            model = RandomForestRegressor(
-                n_estimators=200,
-                random_state=42,
-                n_jobs=-1,
-            )
+            model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
             X_train, X_val, y_train, y_val = train_test_split(
                 X, y, test_size=0.2, random_state=42
             )
@@ -312,21 +292,24 @@ def train_baseline(
             res = {
                 "model_type": "RandomForestRegressor",
                 "rmse": rmse,
+                "training_log": {
+                    "dropped_columns": drop_cols,
+                    "used_class_weight": False,
+                    "stratified_split": False,
+                },
             }
+
             if return_model:
                 res["pipeline"] = pipe
+
             return res
 
-        return {
-            "model_type": "skipped",
-            "reason": "Задача не определена (только EDA).",
-        }
+        # если задача непонятна
+        return {"model_type": "skipped", "reason": "Задача не определена."}
 
     except Exception as e:
-        return {
-            "model_type": "skipped",
-            "reason": f"Во время обучения возникла ошибка: {e}",
-        }
+        return {"model_type": "skipped", "reason": f"Ошибка обучения: {e}"}
+
 
 
 # ---------------------------------------------------------------------
