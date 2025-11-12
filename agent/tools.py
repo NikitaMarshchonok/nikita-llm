@@ -966,3 +966,271 @@ def extract_feature_importance(pipeline) -> list[dict]:
         return items[:50]
     except Exception:
         return []
+
+
+# ---------------------------------------------------------------------
+# 11. Краткая сводка по таргету
+# ---------------------------------------------------------------------
+def summarize_target(df: pd.DataFrame, task: dict) -> dict:
+    """
+    Возвращает json-friendly сводку по таргету:
+    - что за колонка
+    - сколько пропусков
+    - для классификации: топ-классы
+    - для регрессии: min/max/mean/std
+    Всё без NaN, чтобы FastAPI не ругался.
+    """
+    target = (task or {}).get("target")
+    task_type = (task or {}).get("task", "eda")
+
+    if not target or target not in df.columns:
+        return {
+            "has_target": False,
+            "reason": "target_not_found",
+        }
+
+    col = df[target]
+    n_rows = len(df)
+    n_missing = int(col.isna().sum())
+
+    base = {
+        "has_target": True,
+        "target": target,
+        "task": task_type,
+        "n_rows": int(n_rows),
+        "n_missing": n_missing,
+        "missing_frac": float(n_missing / n_rows) if n_rows else 0.0,
+    }
+
+    # КЛАССИФИКАЦИЯ
+    if task_type == "classification":
+        vc = col.value_counts(dropna=False)
+        n_classes = int(len(vc))
+
+        # делаем json-friendly список
+        top_classes = []
+        for cls, cnt in vc.head(20).items():   # режем, чтобы не тащить 1000 классов
+            if pd.isna(cls):
+                label = "__NaN__"
+            else:
+                label = str(cls)
+            top_classes.append({
+                "label": label,
+                "count": int(cnt),
+                "share": float(cnt / n_rows) if n_rows else 0.0,
+            })
+
+        base.update({
+            "n_classes": n_classes,
+            "top_classes": top_classes,
+        })
+        return base
+
+    # РЕГРЕССИЯ / ЧИСЛОВОЙ ТАРГЕТ
+    if pd.api.types.is_numeric_dtype(col):
+        base.update({
+            "min": float(col.min(skipna=True)) if col.notna().any() else 0.0,
+            "max": float(col.max(skipna=True)) if col.notna().any() else 0.0,
+            "mean": float(col.mean(skipna=True)) if col.notna().any() else 0.0,
+            "std": float(col.std(skipna=True)) if col.notna().any() else 0.0,
+        })
+    else:
+        # если таргет не numeric, но задача регрессии — всё равно что-то вернём
+        base.update({
+            "note": "target_is_not_numeric",
+        })
+
+    return base
+
+
+# ---------------------------------------------------------------------
+# 12. Ранжирование проблем по важности
+# ---------------------------------------------------------------------
+def rank_problems(problems: dict) -> list[dict]:
+    """
+    Превращает dict из analyze_dataset в список структур:
+    [{key, severity, message, data}, ...]
+    чтобы фронт мог показать сначала high, потом medium, потом low.
+    """
+    problems = problems or {}
+    ranked: list[dict] = []
+
+    # 1. NaN в таргете — всегда high
+    if problems.get("target_has_nan"):
+        info = problems["target_has_nan"]
+        ranked.append({
+            "key": "target_has_nan",
+            "severity": "high",
+            "message": f"В таргете {info.get('column')} есть {info.get('nan_count')} пропусков — убери перед обучением.",
+            "data": info,
+        })
+
+    # 2. дисбаланс
+    if problems.get("class_imbalance"):
+        ci = problems["class_imbalance"]
+        ranked.append({
+            "key": "class_imbalance",
+            "severity": "high",
+            "message": (
+                "Найден дисбаланс классов — используй class_weight='balanced', "
+                "stratify при train_test_split или oversampling."
+            ),
+            "data": ci,
+        })
+
+    # 3. много пропусков в фичах
+    if problems.get("high_null_features"):
+        ranked.append({
+            "key": "high_null_features",
+            "severity": "medium",
+            "message": "Есть признаки с >30% пропусков — заполни/удали/сделай флаг.",
+            "data": problems["high_null_features"],
+        })
+
+    # 4. константы
+    if problems.get("constant_features"):
+        ranked.append({
+            "key": "constant_features",
+            "severity": "medium",
+            "message": "Есть полностью константные признаки — можно удалить.",
+            "data": problems["constant_features"],
+        })
+
+    # 5. почти константные
+    if problems.get("quasi_constant_features"):
+        ranked.append({
+            "key": "quasi_constant_features",
+            "severity": "low",
+            "message": "Есть почти константные признаки — проверь полезность.",
+            "data": problems["quasi_constant_features"],
+        })
+
+    # 6. корреляции
+    if problems.get("high_corr_pairs"):
+        ranked.append({
+            "key": "high_corr_pairs",
+            "severity": "low",
+            "message": "Есть сильно коррелирующие признаки — можно отфильтровать.",
+            "data": problems["high_corr_pairs"][:20],  # не тащим всё
+        })
+
+    # 7. высокая кардинальность
+    if problems.get("high_cardinality"):
+        ranked.append({
+            "key": "high_cardinality",
+            "severity": "medium",
+            "message": "Категориальные признаки с большим числом значений — лучше CatBoost/target encoding.",
+            "data": problems["high_cardinality"],
+        })
+
+    # если ничего не нашли — вернём пустой список
+    return ranked
+
+
+
+def build_code_hints(problems: dict, task: dict) -> list[dict]:
+    """
+    Возвращаем список "код-подсказок", чтобы фронт мог показать
+    готовые куски кода под обнаруженные проблемы.
+    Формат элемента:
+    {
+        "title": "Обработать дисбаланс",
+        "snippet": "from imblearn.over_sampling import SMOTE\n...",
+        "reason": "Найден дисбаланс классов"
+    }
+    """
+    problems = problems or {}
+    task = task or {}
+    hints: list[dict] = []
+
+    # 1) дисбаланс классов
+    if problems.get("class_imbalance") and task.get("task") == "classification":
+        hints.append({
+            "title": "Классификация с class_weight='balanced'",
+            "reason": "Найден дисбаланс классов",
+            "snippet": (
+                "from sklearn.ensemble import RandomForestClassifier\n"
+                "clf = RandomForestClassifier(class_weight='balanced', n_estimators=300, random_state=42)\n"
+                "clf.fit(X_train, y_train)\n"
+                "preds = clf.predict(X_val)"
+            ),
+        })
+        hints.append({
+            "title": "Oversampling через imblearn",
+            "reason": "Найден дисбаланс классов",
+            "snippet": (
+                "from imblearn.over_sampling import RandomOverSampler\n"
+                "ros = RandomOverSampler(random_state=42)\n"
+                "X_res, y_res = ros.fit_resample(X_train, y_train)\n"
+                "# дальше обучай модель на X_res, y_res"
+            ),
+        })
+
+    # 2) много категорий → CatBoost
+    if problems.get("high_cardinality"):
+        hints.append({
+            "title": "CatBoost для колонок с высокой кардинальностью",
+            "reason": "Есть категориальные признаки с большим числом значений",
+            "snippet": (
+                "from catboost import CatBoostClassifier\n"
+                "# индексами укажи категориальные признаки\n"
+                "cat_features = [0, 3, 5]\n"
+                "model = CatBoostClassifier(depth=6, learning_rate=0.1, loss_function='MultiClass', verbose=False)\n"
+                "model.fit(X_train, y_train, cat_features=cat_features, eval_set=(X_val, y_val))"
+            ),
+        })
+
+    # 3) пропуски в таргете
+    if problems.get("target_has_nan"):
+        col = problems["target_has_nan"]["column"]
+        hints.append({
+            "title": "Удалить строки с NaN в таргете",
+            "reason": f"В целевой колонке {col} есть пропуски",
+            "snippet": (
+                f"df = df[~df['{col}'].isna()].copy()\n"
+                "# дальше делай train/test split"
+            ),
+        })
+
+    # 4) много пропусков в фичах
+    if problems.get("high_null_features"):
+        hints.append({
+            "title": "Пайплайн с SimpleImputer",
+            "reason": "Есть признаки с >30% пропусков",
+            "snippet": (
+                "from sklearn.impute import SimpleImputer\n"
+                "from sklearn.pipeline import Pipeline\n"
+                "from sklearn.ensemble import RandomForestClassifier\n"
+                "pipe = Pipeline([\n"
+                "    ('imputer', SimpleImputer(strategy='median')),\n"
+                "    ('model', RandomForestClassifier())\n"
+                "])\n"
+                "pipe.fit(X_train, y_train)"
+            ),
+        })
+
+    # 5) просто заготовка под задачу
+    if task.get("task") == "regression":
+        hints.append({
+            "title": "Базовая регрессия (RF)",
+            "reason": "Задача определена как регрессия",
+            "snippet": (
+                "from sklearn.ensemble import RandomForestRegressor\n"
+                "model = RandomForestRegressor(n_estimators=300, random_state=42)\n"
+                "model.fit(X_train, y_train)\n"
+                "preds = model.predict(X_val)"
+            ),
+        })
+    elif task.get("task") == "classification":
+        hints.append({
+            "title": "Базовая классификация (RF)",
+            "reason": "Задача определена как классификация",
+            "snippet": (
+                "from sklearn.ensemble import RandomForestClassifier\n"
+                "model = RandomForestClassifier(n_estimators=300, random_state=42)\n"
+                "model.fit(X_train, y_train)\n"
+                "preds = model.predict(X_val)"
+            ),
+        })
+
+    return hints
