@@ -141,21 +141,20 @@
       background: var(--card);
       border-radius: var(--radius);
       padding: 14px 16px;
-      height: 40%; /* было 46, чуть уменьшил, чтобы влез блок рекомендаций */
-      min-height: 220px;
+      height: 38%;
+      min-height: 200px;
       overflow-y: auto;
       white-space: pre-wrap;
-      font-family: ui-monospace, SFMono-Regular, SFMono-Regular, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       font-size: 12px;
       line-height: 1.5;
     }
-    /* NEW: блок рекомендаций */
     .recs-box {
       background: rgba(15, 23, 42, 0.3);
       border: 1px solid rgba(148, 163, 184, 0.03);
       border-radius: var(--radius);
       padding: 10px 14px 12px;
-      min-height: 80px;
+      min-height: 60px;
       max-height: 110px;
       overflow-y: auto;
       font-size: 12px;
@@ -180,7 +179,7 @@
     .plots-row {
       display: flex;
       gap: 16px;
-      height: 48%; /* было 54 */
+      height: 40%; /* чуть меньше, потому что добавили ещё один блок */
       overflow-x: auto;
     }
     .plot-card {
@@ -278,14 +277,13 @@
         Здесь появится отчёт ✨
       </div>
 
-      <!-- NEW: здесь будем показывать build_recommendations -->
-      <div class="recs-box" id="recs">
-        <!-- заполним из JS -->
-      </div>
+      <!-- блок рекомендаций -->
+      <div class="recs-box" id="recs"></div>
 
-      <div class="plots-row" id="plotsRow">
-        <!-- сюда вставим графики -->
-      </div>
+      <!-- НОВЫЙ блок: важность фич / идеи фич / код -->
+      <div class="recs-box" id="mlHints"></div>
+
+      <div class="plots-row" id="plotsRow"></div>
     </section>
 
     <!-- справа: список запусков -->
@@ -304,7 +302,8 @@
     const statusEl = document.getElementById('status');
     const runsList = document.getElementById('runsList');
     const uploadBtn = document.getElementById('uploadBtn');
-    const recsBox = document.getElementById('recs'); // NEW
+    const recsBox = document.getElementById('recs');
+    const mlHintsBox = document.getElementById('mlHints');  // ← новый блок
 
     let currentRunId = null;
 
@@ -343,7 +342,8 @@
         currentRunId = data.run_id;
 
         renderReport(data);
-        renderRecommendations(data);  // NEW
+        renderRecommendations(data);
+        renderMLHints(data);           // ← показываем новый блок
         renderPlots(data);
 
         loadRuns();
@@ -383,7 +383,6 @@
       reportBox.textContent = txt;
     }
 
-    // NEW: показываем список рекомендаций, если пришли
     function renderRecommendations(data) {
       recsBox.innerHTML = '';
       const recs = data.recommendations;
@@ -401,6 +400,50 @@
       });
       recsBox.appendChild(h);
       recsBox.appendChild(ul);
+    }
+
+    // НОВОЕ: важность фич, идеи фич и кодовые подсказки
+    function renderMLHints(data) {
+      mlHintsBox.innerHTML = '';
+      const parts = [];
+
+      // важность фич
+      if (data.feature_importance && Array.isArray(data.feature_importance) && data.feature_importance.length > 0) {
+        const top = data.feature_importance.slice(0, 5);
+        let html = '<div style="margin-bottom:4px;"><strong>Топ фич по важности:</strong></div><ul>';
+        top.forEach(fi => {
+          const imp = typeof fi.importance === 'number' ? fi.importance.toFixed(3) : fi.importance;
+          html += `<li>${fi.feature} — ${imp}</li>`;
+        });
+        html += '</ul>';
+        parts.push(html);
+      }
+
+      // идеи фич
+      if (data.feature_suggestions && Array.isArray(data.feature_suggestions) && data.feature_suggestions.length > 0) {
+        let html = '<div style="margin-bottom:4px;"><strong>Идеи новых фич:</strong></div><ul>';
+        data.feature_suggestions.slice(0, 5).forEach(s => {
+          html += `<li>${s}</li>`;
+        });
+        html += '</ul>';
+        parts.push(html);
+      }
+
+      // код-подсказки
+      if (data.code_hints && Array.isArray(data.code_hints) && data.code_hints.length > 0) {
+        let html = '<div style="margin-bottom:4px;"><strong>Код / приёмы:</strong></div><ul>';
+        data.code_hints.slice(0, 5).forEach(s => {
+          html += `<li>${s}</li>`;
+        });
+        html += '</ul>';
+        parts.push(html);
+      }
+
+      if (parts.length === 0) {
+        mlHintsBox.innerHTML = '<span style="color:var(--text-muted);">Пока нечего подсказать по фичам/коду.</span>';
+      } else {
+        mlHintsBox.innerHTML = parts.join('<hr style="border:0; border-top:1px solid rgba(148,163,184,0.05); margin:6px 0;">');
+      }
     }
 
     function renderPlots(data) {
@@ -455,7 +498,8 @@
         const data = await resp.json();
         currentRunId = runId;
         renderReport(data);
-        renderRecommendations(data); // NEW
+        renderRecommendations(data);
+        renderMLHints(data);  // ← тоже показываем
         renderPlots(data);
         Array.from(runsList.children).forEach(ch => {
           ch.classList.toggle('active', ch.textContent.includes(runId));
