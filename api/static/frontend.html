@@ -73,11 +73,6 @@
       height: calc(100vh - 90px);
       overflow-y: auto;
     }
-    .card {
-      background: var(--card);
-      border-radius: var(--radius);
-      border: 1px solid rgba(148, 163, 184, 0.05);
-    }
     label {
       font-size: 13px;
       color: var(--text);
@@ -175,11 +170,10 @@
       margin-bottom: 4px;
       color: var(--text-muted);
     }
-
     .plots-row {
       display: flex;
       gap: 16px;
-      height: 40%; /* чуть меньше, потому что добавили ещё один блок */
+      height: 40%;
       overflow-x: auto;
     }
     .plot-card {
@@ -227,21 +221,28 @@
       font-size: 12px;
       color: var(--text-muted);
     }
+
+    /* стили для кода */
+    details summary {
+      cursor: pointer;
+      user-select: none;
+    }
+    pre {
+      background: rgba(17, 24, 39, 0.85);
+      border: 1px solid rgba(148,163,184,0.08);
+      border-radius: 10px;
+      padding: 10px 12px;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.45;
+      margin: 6px 0 0;
+    }
+
     @media (max-width: 1100px) {
-      main {
-        flex-direction: column;
-      }
-      .left-panel,
-      .right-panel {
-        width: 100%;
-        height: auto;
-      }
-      .middle-panel {
-        height: auto;
-      }
-      .plots-row {
-        height: auto;
-      }
+      main { flex-direction: column; }
+      .left-panel, .right-panel { width: 100%; height: auto; }
+      .middle-panel { height: auto; }
+      .plots-row { height: auto; }
     }
   </style>
 </head>
@@ -271,16 +272,12 @@
       <small style="font-size:11px; color:var(--text-muted);">Файл отправляется на <code>/upload</code>, бэкенд делает EDA и модель.</small>
     </section>
 
-    <!-- центр: отчёт + рекомендации + графики -->
+    <!-- центр: отчёт + рекомендации + ML-подсказки + графики -->
     <section class="middle-panel">
-      <div class="report-box" id="reportBox">
-        Здесь появится отчёт ✨
-      </div>
+      <div class="report-box" id="reportBox">Здесь появится отчёт ✨</div>
 
-      <!-- блок рекомендаций -->
       <div class="recs-box" id="recs"></div>
 
-      <!-- НОВЫЙ блок: важность фич / идеи фич / код -->
       <div class="recs-box" id="mlHints"></div>
 
       <div class="plots-row" id="plotsRow"></div>
@@ -297,20 +294,27 @@
   </main>
 
   <script>
-    const reportBox = document.getElementById('reportBox');
-    const plotsRow = document.getElementById('plotsRow');
-    const statusEl = document.getElementById('status');
-    const runsList = document.getElementById('runsList');
-    const uploadBtn = document.getElementById('uploadBtn');
-    const recsBox = document.getElementById('recs');
-    const mlHintsBox = document.getElementById('mlHints');  // ← новый блок
+    const reportBox   = document.getElementById('reportBox');
+    const plotsRow    = document.getElementById('plotsRow');
+    const statusEl    = document.getElementById('status');
+    const runsList    = document.getElementById('runsList');
+    const uploadBtn   = document.getElementById('uploadBtn');
+    const recsBox     = document.getElementById('recs');
+    const mlHintsBox  = document.getElementById('mlHints');
 
     let currentRunId = null;
 
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
     async function uploadDataset() {
-      const fileInput = document.getElementById('file');
-      const targetInput = document.getElementById('target');
-      const file = fileInput.files[0];
+      const fileInput  = document.getElementById('file');
+      const targetInput= document.getElementById('target');
+      const file       = fileInput.files[0];
 
       if (!file) {
         statusEl.innerHTML = '<span class="status-err">Сначала выбери CSV</span>';
@@ -325,11 +329,7 @@
       statusEl.innerHTML = '<span style="font-size:12px; color:var(--text-muted);">Загружаем...</span>';
 
       try {
-        const resp = await fetch('/upload', {
-          method: 'POST',
-          body: formData,
-        });
-
+        const resp = await fetch('/upload', { method: 'POST', body: formData });
         const data = await resp.json();
 
         if (!resp.ok) {
@@ -343,9 +343,8 @@
 
         renderReport(data);
         renderRecommendations(data);
-        renderMLHints(data);           // ← показываем новый блок
+        renderMLHints(data);
         renderPlots(data);
-
         loadRuns();
 
       } catch (err) {
@@ -370,15 +369,11 @@
       }
       if (data.model) {
         txt += `🧪 Модель: ${data.model.model_type}`;
-        if (data.model.accuracy != null) {
-          txt += `, acc=${data.model.accuracy.toFixed(3)}`;
-        }
-        if (data.model.f1 != null) {
-          txt += `, f1=${data.model.f1.toFixed(3)}`;
-        }
-        if (data.model.rmse != null) {
-          txt += `, rmse=${data.model.rmse.toFixed(3)}`;
-        }
+        if (data.model.accuracy != null) txt += `, acc=${data.model.accuracy.toFixed(3)}`;
+        if (data.model.f1 != null)       txt += `, f1=${data.model.f1.toFixed(3)}`;
+        if (data.model.roc_auc != null)  txt += `, roc_auc=${data.model.roc_auc.toFixed(3)}`;
+        if (data.model.pr_auc  != null)  txt += `, pr_auc=${data.model.pr_auc.toFixed(3)}`;
+        if (data.model.rmse != null)     txt += `, rmse=${data.model.rmse.toFixed(3)}`;
       }
       reportBox.textContent = txt;
     }
@@ -402,55 +397,64 @@
       recsBox.appendChild(ul);
     }
 
-    // НОВОЕ: важность фич, идеи фич и кодовые подсказки
+    // важность фич, идеи фич и код-подсказки
     function renderMLHints(data) {
       mlHintsBox.innerHTML = '';
       const parts = [];
 
-      // важность фич
-      if (data.feature_importance && Array.isArray(data.feature_importance) && data.feature_importance.length > 0) {
+      // 1) важность фич
+      if (Array.isArray(data.feature_importance) && data.feature_importance.length > 0) {
         const top = data.feature_importance.slice(0, 5);
         let html = '<div style="margin-bottom:4px;"><strong>Топ фич по важности:</strong></div><ul>';
         top.forEach(fi => {
           const imp = typeof fi.importance === 'number' ? fi.importance.toFixed(3) : fi.importance;
-          html += `<li>${fi.feature} — ${imp}</li>`;
+          html += `<li>${escapeHtml(fi.feature)} — ${escapeHtml(imp)}</li>`;
         });
         html += '</ul>';
         parts.push(html);
       }
 
-      // идеи фич
-      if (data.feature_suggestions && Array.isArray(data.feature_suggestions) && data.feature_suggestions.length > 0) {
+      // 2) идеи фич
+      if (Array.isArray(data.feature_suggestions) && data.feature_suggestions.length > 0) {
         let html = '<div style="margin-bottom:4px;"><strong>Идеи новых фич:</strong></div><ul>';
         data.feature_suggestions.slice(0, 5).forEach(s => {
-          html += `<li>${s}</li>`;
+          html += `<li>${escapeHtml(s)}</li>`;
         });
         html += '</ul>';
         parts.push(html);
       }
 
-      // код-подсказки
-      if (data.code_hints && Array.isArray(data.code_hints) && data.code_hints.length > 0) {
+      // 3) код / приёмы — сворачиваемые блоки
+      if (Array.isArray(data.code_hints) && data.code_hints.length > 0) {
         let html = '<div style="margin-bottom:4px;"><strong>Код / приёмы:</strong></div><ul>';
-        data.code_hints.slice(0, 5).forEach(s => {
-          html += `<li>${s}</li>`;
+        data.code_hints.slice(0, 5).forEach(hint => {
+          if (typeof hint === 'string') {
+            html += `<li>${escapeHtml(hint)}</li>`;
+          } else if (hint && typeof hint === 'object') {
+            const title = hint.title || hint.name || 'snippet';
+            const code  = hint.code  || hint.snippet || hint.text || '';
+            html += `<li>
+              <details>
+                <summary>${escapeHtml(title)}</summary>
+                ${code ? `<pre><code>${escapeHtml(code)}</code></pre>` : ''}
+              </details>
+            </li>`;
+          } else {
+            html += `<li>${escapeHtml(String(hint))}</li>`;
+          }
         });
         html += '</ul>';
         parts.push(html);
       }
 
-      if (parts.length === 0) {
-        mlHintsBox.innerHTML = '<span style="color:var(--text-muted);">Пока нечего подсказать по фичам/коду.</span>';
-      } else {
-        mlHintsBox.innerHTML = parts.join('<hr style="border:0; border-top:1px solid rgba(148,163,184,0.05); margin:6px 0;">');
-      }
+      mlHintsBox.innerHTML = parts.length
+        ? parts.join('<hr style="border:0; border-top:1px solid rgba(148,163,184,0.05); margin:6px 0;">')
+        : '<span style="color:var(--text-muted);">Пока нечего подсказать по фичам/коду.</span>';
     }
 
     function renderPlots(data) {
       plotsRow.innerHTML = '';
-      if (!data.plots || !Array.isArray(data.plots) || data.plots.length === 0) {
-        return;
-      }
+      if (!data.plots || !Array.isArray(data.plots) || data.plots.length === 0) return;
       data.plots.forEach(p => {
         const card = document.createElement('div');
         card.className = 'plot-card';
@@ -499,7 +503,7 @@
         currentRunId = runId;
         renderReport(data);
         renderRecommendations(data);
-        renderMLHints(data);  // ← тоже показываем
+        renderMLHints(data);
         renderPlots(data);
         Array.from(runsList.children).forEach(ch => {
           ch.classList.toggle('active', ch.textContent.includes(runId));

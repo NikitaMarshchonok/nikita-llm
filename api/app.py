@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, FileResponse, PlainTextResponse
 
 from agent.tools import (
@@ -33,9 +34,8 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# простое хранилище в памяти
+# JSON-safe данные отдельно от несериализуемых объектов (pipelines)
 RUNS: dict[str, dict] = {}
-# а сюда будем класть несериализуемые объекты (sklearn-пайплайны)
 PIPELINES: dict[str, object] = {}
 
 
@@ -96,15 +96,18 @@ async def upload_dataset(
         df = read_csv_safely(contents)
         df = normalize_columns(df)
 
-        # 2) нормализуем target, если пользователь его указал
+        # 2) нормализуем target; пустую строку считаем отсутствующим target
         if target is not None:
-            target = (
-                target.strip()
-                .replace(" ", "_")
-                .replace(".", "_")
-                .replace("-", "_")
-                .replace("/", "_")
-            )
+            target = target.strip()
+            if target == "":
+                target = None
+            else:
+                target = (
+                    target.replace(" ", "_")
+                    .replace(".", "_")
+                    .replace("-", "_")
+                    .replace("/", "_")
+                )
 
         # 3) EDA
         eda = basic_eda(df)
@@ -127,15 +130,11 @@ async def upload_dataset(
         # 5.4) идеи по новым фичам
         feature_suggestions = auto_feature_suggestions(df)
 
-        # 5.5) код-подсказки (новое)
-        code_hints = build_code_hints(problems, task)
-
         # 6) базовая модель
         model_res = None
         pipeline = None
         feature_importance: list[dict] = []
-        if task["task"] != "eda" and task["target"]:
-            # просим вернуть пайплайн
+        if task["task"] != "eda" and task.get("target"):
             model_res = train_baseline(
                 df,
                 task["target"],
@@ -143,11 +142,30 @@ async def upload_dataset(
                 problems=problems,
                 return_model=True,
             )
-
-            # вытаскиваем pipeline и не даём ему уйти в JSON
             if model_res and "pipeline" in model_res:
                 pipeline = model_res.pop("pipeline")
-                feature_importance = extract_feature_importance(pipeline)
+                try:
+                    feature_importance = extract_feature_importance(pipeline)
+                except Exception:
+                    feature_importance = []
+
+        # 6.1) код-подсказки — совместимость со старыми сигнатурами
+        code_hints = []
+        try:
+            # новая (желаемая) сигнатура
+            code_hints = build_code_hints(task=task, problems=problems, model=model_res)  # type: ignore
+        except TypeError:
+            try:
+                # старая: (task, problems)
+                code_hints = build_code_hints(task, problems)  # type: ignore
+            except TypeError:
+                try:
+                    # очень старая: (problems, task)
+                    code_hints = build_code_hints(problems, task)  # type: ignore
+                except Exception:
+                    code_hints = []
+        except Exception:
+            code_hints = []
 
         # 7) человекочитаемый отчёт
         report_text = build_report(df, eda, task, model_res, problems)
@@ -162,7 +180,7 @@ async def upload_dataset(
         status = build_analysis_status(task, problems, model_res)
         next_actions = build_next_actions(task, problems, model_res)
 
-        # 11) сохраняем в память (без pipeline!)
+        # 11) сохраняем (pipeline в отдельном слоте)
         run_id = f"run_{uuid4().hex[:8]}"
         RUNS[run_id] = {
             "run_id": run_id,
@@ -184,32 +202,30 @@ async def upload_dataset(
             "code_hints": code_hints,
             "columns": list(df.columns),
         }
-        # пайплайн кладём в отдельный словарь
         if pipeline is not None:
             PIPELINES[run_id] = pipeline
 
-        # 12) отдаём на фронт (без pipeline!)
-        return JSONResponse(
-            {
-                "run_id": run_id,
-                "filename": file.filename,
-                "eda": eda,
-                "task": task,
-                "problems": problems,
-                "problem_list": problem_list,
-                "target_summary": target_summary,
-                "dataset_health": dataset_health,
-                "model": model_res,
-                "report": report_text,
-                "plots": plots,
-                "recommendations": recs,
-                "status": status,
-                "next_actions": next_actions,
-                "feature_suggestions": feature_suggestions,
-                "feature_importance": feature_importance,
-                "code_hints": code_hints,
-            }
-        )
+        # 12) отдаём безопасно для JSON (numpy → python)
+        payload = {
+            "run_id": run_id,
+            "filename": file.filename,
+            "eda": eda,
+            "task": task,
+            "problems": problems,
+            "problem_list": problem_list,
+            "target_summary": target_summary,
+            "dataset_health": dataset_health,
+            "model": model_res,
+            "report": report_text,
+            "plots": plots,
+            "recommendations": recs,
+            "status": status,
+            "next_actions": next_actions,
+            "feature_suggestions": feature_suggestions,
+            "feature_importance": feature_importance,
+            "code_hints": code_hints,
+        }
+        return JSONResponse(content=jsonable_encoder(payload))
 
     except ValueError as e:
         raise HTTPException(
@@ -235,7 +251,6 @@ async def upload_dataset(
 def get_run(run_id: str):
     if run_id not in RUNS:
         raise HTTPException(status_code=404, detail="run_id not found")
-    # возвращаем только сериализуемое
     return RUNS[run_id]
 
 
