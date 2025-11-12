@@ -20,10 +20,11 @@ from agent.tools import (
     evaluate_dataset_health,
     build_analysis_status,
     build_next_actions,
-    summarize_target,        # ← у тебя уже было
-    rank_problems,           # ← у тебя уже было
-    auto_feature_suggestions,    # ← добавили
-    extract_feature_importance,  # ← добавили
+    summarize_target,
+    rank_problems,
+    auto_feature_suggestions,
+    extract_feature_importance,
+    build_code_hints,
 )
 
 app = FastAPI(
@@ -34,6 +35,8 @@ app = FastAPI(
 
 # простое хранилище в памяти
 RUNS: dict[str, dict] = {}
+# а сюда будем класть несериализуемые объекты (sklearn-пайплайны)
+PIPELINES: dict[str, object] = {}
 
 
 def read_csv_safely(file_bytes: bytes) -> pd.DataFrame:
@@ -121,8 +124,11 @@ async def upload_dataset(
         # 5.3) общая “здоровость” датасета
         dataset_health = evaluate_dataset_health(eda, problems)
 
-        # 5.4) идеи по новым фичам (это чистый список строк)
+        # 5.4) идеи по новым фичам
         feature_suggestions = auto_feature_suggestions(df)
+
+        # 5.5) код-подсказки (новое)
+        code_hints = build_code_hints(problems, task)
 
         # 6) базовая модель
         model_res = None
@@ -138,7 +144,7 @@ async def upload_dataset(
                 return_model=True,
             )
 
-            # вытаскиваем pipeline и не даём ему попасть в JSON
+            # вытаскиваем pipeline и не даём ему уйти в JSON
             if model_res and "pipeline" in model_res:
                 pipeline = model_res.pop("pipeline")
                 feature_importance = extract_feature_importance(pipeline)
@@ -156,7 +162,7 @@ async def upload_dataset(
         status = build_analysis_status(task, problems, model_res)
         next_actions = build_next_actions(task, problems, model_res)
 
-        # 11) сохраняем в память
+        # 11) сохраняем в память (без pipeline!)
         run_id = f"run_{uuid4().hex[:8]}"
         RUNS[run_id] = {
             "run_id": run_id,
@@ -175,9 +181,12 @@ async def upload_dataset(
             "next_actions": next_actions,
             "feature_suggestions": feature_suggestions,
             "feature_importance": feature_importance,
+            "code_hints": code_hints,
             "columns": list(df.columns),
-            "pipeline": pipeline,   # храним только в RAM, не в JSON
         }
+        # пайплайн кладём в отдельный словарь
+        if pipeline is not None:
+            PIPELINES[run_id] = pipeline
 
         # 12) отдаём на фронт (без pipeline!)
         return JSONResponse(
@@ -198,6 +207,7 @@ async def upload_dataset(
                 "next_actions": next_actions,
                 "feature_suggestions": feature_suggestions,
                 "feature_importance": feature_importance,
+                "code_hints": code_hints,
             }
         )
 
@@ -225,6 +235,7 @@ async def upload_dataset(
 def get_run(run_id: str):
     if run_id not in RUNS:
         raise HTTPException(status_code=404, detail="run_id not found")
+    # возвращаем только сериализуемое
     return RUNS[run_id]
 
 
