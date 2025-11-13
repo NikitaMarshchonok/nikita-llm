@@ -576,6 +576,43 @@ def get_run_report(run_id: str):
     return RUNS[run_id]
 
 
+@app.post("/ask")
+async def ask_agent(
+    run_id: str = Form(..., description="ID запуска (run_id), по которому спрашиваем"),
+    question: str = Form(..., description="Вопрос к DS-агенту"),
+):
+    """
+    LLM-слой поверх DS-агента:
+    - по run_id вытаскиваем весь контекст (EDA, модель, проблемы, рекомендации),
+    - собираем текстовый контекст,
+    - формируем промпт и отправляем в call_llm (пока заглушка),
+    - возвращаем текстовый ответ.
+    """
+    if run_id not in RUNS:
+        raise HTTPException(status_code=404, detail="run_id not found")
+
+    run = RUNS[run_id]
+    context_text = build_llm_context(run)
+
+    prompt = (
+        "Ты — опытный Data Science ассистент. "
+        "У тебя есть результаты анализа датасета и базовой модели.\n\n"
+        "=== Контекст анализа ===\n"
+        f"{context_text}\n\n"
+        "=== Вопрос пользователя ===\n"
+        f"{question}\n\n"
+        "Ответь по-русски или на английском, структурировано, с конкретными шагами, "
+        "без лишней воды. Если уместно — предложи 2–3 следующих шага."
+    )
+
+    answer = call_llm(prompt)
+
+    return {
+        "run_id": run_id,
+        "question": question,
+        "answer": answer,
+    }
+
 @app.get("/runs/{run_id}/download")
 def download_run_markdown(run_id: str):
     if run_id not in RUNS:
