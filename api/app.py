@@ -420,6 +420,7 @@ async def upload_dataset(
         # 5.4) идеи фич
         feature_suggestions = auto_feature_suggestions(df)
 
+
         # 6) модель
         model_res: Optional[Dict[str, Any]] = None
         pipeline = None
@@ -440,18 +441,10 @@ async def upload_dataset(
                 except Exception:
                     feature_importance = []
 
-        # 6.1) код-подсказки (совместимость со старыми сигнатурами)
+        # 6.1) код-подсказки
         code_hints: List[Any] = []
         try:
-            code_hints = build_code_hints(task=task, problems=problems, model=model_res)  # type: ignore
-        except TypeError:
-            try:
-                code_hints = build_code_hints(task, problems)  # type: ignore
-            except TypeError:
-                try:
-                    code_hints = build_code_hints(problems, task)  # type: ignore
-                except Exception:
-                    code_hints = []
+            code_hints = build_code_hints(problems, task)
         except Exception:
             code_hints = []
 
@@ -464,7 +457,7 @@ async def upload_dataset(
         # 9) рекомендации
         recs = build_recommendations(df, eda, task, problems, model_res)
 
-        # 10) статус + next actions
+         # 10) статус + next actions
         status = build_analysis_status(task, problems, model_res)
         next_actions = build_next_actions(task, problems, model_res)
 
