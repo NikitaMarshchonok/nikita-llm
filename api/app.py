@@ -30,6 +30,7 @@ from agent.tools import (
     extract_feature_importance,
     build_code_hints,
     detect_column_roles,
+    build_experiment_plan,
 )
 
 # ---------------------------
@@ -37,8 +38,8 @@ from agent.tools import (
 # ---------------------------
 app = FastAPI(
     title="Nikita DS Agent",
-    description="Загрузи CSV → получи EDA, базовую модель и инференс",
-    version="0.2.0",
+    description="Загрузи файл с данными → получи EDA, базовую модель и умный план действий",
+    version="0.3.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -148,7 +149,8 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 def align_features_for_inference(
     df: pd.DataFrame, train_cols: List[str], target: Optional[str]
 ) -> pd.DataFrame:
-    """Делает так, чтобы у инференса были те же фичи, что и при обучении:
+    """
+    Делает так, чтобы у инференса были те же фичи, что и при обучении:
     - выкидывает target, если он есть в df
     - создаёт отсутствующие колонки с NaN
     - упорядочивает колонки как в train_cols (без target)
@@ -160,15 +162,14 @@ def align_features_for_inference(
     for c in feat_cols:
         if c not in df.columns:
             df[c] = pd.NA
-    # Добавочные столбцы в df pipeline обычно просто игнорирует, но
-    # безопаснее отдать только те, что были в обучении.
     return df[feat_cols]
 
 
 def build_llm_context(run: Dict[str, Any]) -> str:
     """
     Собираем текстовый контекст по одному run для LLM:
-    задача, здоровье датасета, метрики, важные фичи, проблемы и рекомендации.
+    задача, здоровье датасета, метрики, важные фичи, проблемы,
+    рекомендации и план экспериментов.
     """
     parts: list[str] = []
 
@@ -181,6 +182,7 @@ def build_llm_context(run: Dict[str, Any]) -> str:
     problem_list = run.get("problem_list") or []
     recommendations = run.get("recommendations") or []
     next_actions = run.get("next_actions") or []
+    experiment_plan = run.get("experiment_plan") or []
 
     # Задача
     parts.append("=== Задача и таргет ===")
@@ -206,11 +208,15 @@ def build_llm_context(run: Dict[str, Any]) -> str:
             parts.append("Проблемы: " + "; ".join(reasons))
         parts.append("")
 
-    # Сводка по таргету (новая версия summarize_target)
+    # Сводка по таргету
     if target_summary and (target_summary.get("target") or target_summary.get("has_target")):
         parts.append("=== Таргет ===")
         parts.append(f"Имя таргета: {target_summary.get('target')}")
-        parts.append(f"Строк: {target_summary.get('n_rows')}, пропусков: {target_summary.get('n_missing')}")
+        parts.append(
+            f"Строк: {target_summary.get('n_rows')}, "
+            f"пропусков: {target_summary.get('n_missing')} "
+            f"(доля={target_summary.get('missing_frac')})"
+        )
         if target_summary.get("task") == "classification":
             parts.append(f"Число классов: {target_summary.get('n_classes')}")
             top_classes = target_summary.get("top_classes") or []
@@ -280,6 +286,16 @@ def build_llm_context(run: Dict[str, Any]) -> str:
             parts.append(f"- {a}")
         parts.append("")
 
+    # План экспериментов
+    if experiment_plan:
+        parts.append("=== План экспериментов (mid+ DS) ===")
+        for step in experiment_plan[:10]:
+            prio = step.get("priority")
+            title = step.get("title")
+            descr = step.get("description")
+            parts.append(f"- [{prio}] {title}: {descr}")
+        parts.append("")
+
     return "\n".join(parts)
 
 
@@ -291,36 +307,21 @@ def call_llm(prompt: str) -> str:
       - твой create-llm чат-сервис,
       - или OpenAI / HuggingFace.
     """
-    # TODO: здесь будет реальный вызов LLM
-    # Пример для OpenAI (как набросок, ОБЯЗАТЕЛЬНО откомментирован):
-    #
-    # from openai import OpenAI
-    # client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    # resp = client.chat.completions.create(
-    #     model="gpt-4.1-mini",
-    #     messages=[{"role": "user", "content": prompt}],
-    #     temperature=0.2,
-    # )
-    # return resp.choices[0].message.content
-    #
-    # Пока вернём заглушку:
-
     # Попробуем аккуратно вытащить только вопрос пользователя
-    question_marker = "Вопрос пользователя:"
-    if question_marker in prompt:
-        user_question = prompt.split(question_marker, 1)[1].strip()
+    marker = "=== Вопрос пользователя ==="
+    if marker in prompt:
+        user_question = prompt.split(marker, 1)[1].strip()
     else:
         user_question = prompt.strip()
 
     return (
-        "⚠️ LLM ещё не подключён (стаб).\n\n"
-        "Но вот как я бы интерпретировал ситуацию как DS-ассистент:\n\n"
+        "⚠️ LLM ещё не подключён (stub).\n\n"
+        "Как DS-ассистент я вижу это так:\n\n"
         f"Вопрос: {user_question}\n\n"
-        "• У тебя уже есть EDA, бейзлайн-модель и список проблем.\n"
-        "• Следующий шаг: последовательно закрывать проблемы из блока 'Следующие шаги' и 'Рекомендации'.\n"
-        "• Когда подключим настоящую LLM, здесь будет детальный, адаптивный ответ."
+        "• У тебя уже есть EDA, бейзлайн-модель, проблемы, рекомендации и план экспериментов.\n"
+        "• Последовательно закрывай шаги из блоков 'Следующие шаги' и 'План экспериментов (mid+ DS)'.\n"
+        "• Когда подключим реальную LLM, здесь будет детальный, адаптивный ответ с кодом и примерами."
     )
-
 
 
 # ---------------------------
@@ -349,8 +350,6 @@ async def upload_dataset(
 
         # 1) читаем и нормализуем
         df = read_any_table(contents, file.filename)
-        df = normalize_columns(df)
-
         df = normalize_columns(df)
 
         # 2) нормализуем target; пустую строку считаем отсутствующим target
@@ -409,20 +408,21 @@ async def upload_dataset(
                 except Exception:
                     feature_importance = []
 
-        # 6.1) код-подсказки (совместимость со старыми сигнатурами)
+        # 6.1) код-подсказки (сигнатура build_code_hints(problems, task))
         code_hints: List[Any] = []
         try:
-            code_hints = build_code_hints(task=task, problems=problems, model=model_res)  # type: ignore
-        except TypeError:
-            try:
-                code_hints = build_code_hints(task, problems)  # type: ignore
-            except TypeError:
-                try:
-                    code_hints = build_code_hints(problems, task)  # type: ignore
-                except Exception:
-                    code_hints = []
+            code_hints = build_code_hints(problems, task)
         except Exception:
             code_hints = []
+
+        # 6.2) план экспериментов (mid+ DS)
+        experiment_plan = build_experiment_plan(
+            task=task,
+            problems=problems,
+            dataset_health=dataset_health,
+            model=model_res,
+            column_roles=column_roles,
+        )
 
         # 7) отчёт
         report_text = build_report(df, eda, task, model_res, problems)
@@ -437,7 +437,7 @@ async def upload_dataset(
         status = build_analysis_status(task, problems, model_res)
         next_actions = build_next_actions(task, problems, model_res)
 
-        # 11) сохраняем
+        # 11) сохраняем run
         run_id = f"run_{uuid4().hex[:8]}"
         RUNS[run_id] = {
             "run_id": run_id,
@@ -459,6 +459,7 @@ async def upload_dataset(
             "feature_importance": feature_importance,
             "code_hints": code_hints,
             "columns": list(df.columns),
+            "experiment_plan": experiment_plan,
         }
         if pipeline is not None:
             PIPELINES[run_id] = pipeline
@@ -483,6 +484,7 @@ async def upload_dataset(
                 "feature_suggestions",
                 "feature_importance",
                 "code_hints",
+                "experiment_plan",
             ]
         }
         return JSONResponse(content=jsonable_encoder(payload))
@@ -502,7 +504,7 @@ async def upload_dataset(
             detail={
                 "error": "failed_to_process_file",
                 "details": str(e),
-                "hint": "проверь CSV и target",
+                "hint": "проверь файл и target",
             },
         )
 
@@ -513,11 +515,12 @@ async def upload_dataset(
 @app.post("/runs/{run_id}/predict")
 async def predict_on_run(
     run_id: str,
-    file: UploadFile = File(..., description="CSV c новыми объектами (может содержать target)"),
+    file: UploadFile = File(..., description="Файл с новыми объектами (может содержать target)"),
     include_proba: bool = Form(default=True),
     return_rows: int = Form(default=30),
 ):
-    """Прогоняет новый CSV через pipeline выбранного run_id.
+    """
+    Прогоняет новый файл через pipeline выбранного run_id.
     Если target в файле присутствует, вернём быстрые метрики по этому файлу.
     """
     if run_id not in RUNS:
@@ -531,8 +534,6 @@ async def predict_on_run(
     try:
         contents = await file.read()
         df_new = read_any_table(contents, file.filename)
-        df_new = normalize_columns(df_new)
-
         df_new = normalize_columns(df_new)
 
         task = RUNS[run_id]["task"]
@@ -566,7 +567,13 @@ async def predict_on_run(
         metrics_out = None
         if y_true is not None:
             try:
-                from sklearn.metrics import accuracy_score, f1_score, r2_score, mean_squared_error, mean_absolute_error
+                from sklearn.metrics import (
+                    accuracy_score,
+                    f1_score,
+                    r2_score,
+                    mean_squared_error,
+                    mean_absolute_error,
+                )
 
                 if task_type == "classification":
                     acc = float(accuracy_score(y_true, y_pred))
@@ -584,8 +591,10 @@ async def predict_on_run(
         preview = pd.DataFrame({"prediction": y_pred_list})
         if proba_list is not None:
             preview["proba"] = proba_list
-        # добавим первые return_rows исходных колонок для контекста
-        preview_full = pd.concat([df_new.reset_index(drop=True), preview], axis=1).head(max(1, return_rows))
+        preview_full = pd.concat(
+            [df_new.reset_index(drop=True), preview],
+            axis=1,
+        ).head(max(1, return_rows))
 
         return JSONResponse(
             content=jsonable_encoder(
@@ -594,7 +603,7 @@ async def predict_on_run(
                     "n_rows": int(len(X_inf)),
                     "task": task,
                     "metrics": metrics_out,
-                    "predictions": y_pred_list[:1000],  # возвращаем ограниченно, чтобы не раздуть ответ
+                    "predictions": y_pred_list[:1000],
                     "probabilities": proba_list[:1000] if proba_list is not None else None,
                     "preview": preview_full.to_dict(orient="records"),
                 }
@@ -602,7 +611,7 @@ async def predict_on_run(
         )
 
     except ValueError as e:
-        raise HTTPException(status_code=400, detail={"error": "bad_csv", "details": str(e)})
+        raise HTTPException(status_code=400, detail={"error": "bad_file", "details": str(e)})
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": "predict_failed", "details": str(e)})
 
@@ -639,6 +648,9 @@ def get_run_report(run_id: str):
     return RUNS[run_id]
 
 
+# ---------------------------
+# LLM-слой поверх агента
+# ---------------------------
 @app.post("/ask")
 async def ask_agent(
     run_id: str = Form(..., description="ID запуска (run_id), по которому спрашиваем"),
@@ -646,7 +658,7 @@ async def ask_agent(
 ):
     """
     LLM-слой поверх DS-агента:
-    - по run_id вытаскиваем весь контекст (EDA, модель, проблемы, рекомендации),
+    - по run_id вытаскиваем весь контекст (EDA, модель, проблемы, рекомендации, план),
     - собираем текстовый контекст,
     - формируем промпт и отправляем в call_llm (пока заглушка),
     - возвращаем текстовый ответ.
@@ -659,7 +671,7 @@ async def ask_agent(
 
     prompt = (
         "Ты — опытный Data Science ассистент. "
-        "У тебя есть результаты анализа датасета и базовой модели.\n\n"
+        "У тебя есть результаты анализа датасета, базовой модели, план экспериментов.\n\n"
         "=== Контекст анализа ===\n"
         f"{context_text}\n\n"
         "=== Вопрос пользователя ===\n"
@@ -676,13 +688,17 @@ async def ask_agent(
         "answer": answer,
     }
 
+
+# ---------------------------
+# Export отчёта в Markdown
+# ---------------------------
 @app.get("/runs/{run_id}/download")
 def download_run_markdown(run_id: str):
     if run_id not in RUNS:
         raise HTTPException(status_code=404, detail="run_id not found")
 
     data = RUNS[run_id]
-    lines = []
+    lines: List[str] = []
     lines.append(f"# Run {run_id}")
     if data.get("filename"):
         lines.append(f"**Файл:** {data['filename']}")
@@ -708,6 +724,12 @@ def download_run_markdown(run_id: str):
         lines.append("## Что сделать дальше")
         for r in data["recommendations"]:
             lines.append(f"- {r}")
+        lines.append("")
+
+    if data.get("experiment_plan"):
+        lines.append("## План экспериментов (mid+ DS)")
+        for step in data["experiment_plan"]:
+            lines.append(f"- [{step.get('priority')}] {step.get('title')}: {step.get('description')}")
         lines.append("")
 
     md = "\n".join(lines)

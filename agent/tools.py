@@ -9,7 +9,7 @@ from io import BytesIO
 from typing import Optional, Literal
 
 import pandas as pd
-import numpy as np
+import numpy as np  # можно удалить, если не понадобится
 import re
 
 from sklearn.model_selection import train_test_split
@@ -85,7 +85,7 @@ def basic_eda(df: pd.DataFrame) -> dict:
 
 
 # ---------------------------------------------------------------------
-# 2. угадывание таргета и задачи
+# 2. Угадывание таргета и задачи
 # ---------------------------------------------------------------------
 ID_LIKE = {"id", "ID", "Id", "index", "Rk", "rank"}
 
@@ -99,6 +99,7 @@ def _guess_target(
 ) -> tuple[Literal["eda", "classification", "regression"], Optional[str]]:
     lower_cols = {c.lower(): c for c in df.columns}
 
+    # Явные названия
     for cand in ("target", "label", "class", "y"):
         if cand in lower_cols:
             col = lower_cols[cand]
@@ -107,6 +108,7 @@ def _guess_target(
             else:
                 return "regression", col
 
+    # Классификация по "категориальному" виду
     for c in df.columns:
         if _looks_like_id(c):
             continue
@@ -114,6 +116,7 @@ def _guess_target(
         if 2 <= uniq <= 30:
             return "classification", c
 
+    # Регрессия по числовому признаку
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
     for c in num_cols:
         if _looks_like_id(c):
@@ -125,6 +128,11 @@ def _guess_target(
 
 
 def detect_task(df: pd.DataFrame, target: Optional[str] = None) -> dict:
+    """
+    Возвращает dict с полями:
+      task: "eda" | "classification" | "regression"
+      target: имя колонки или None
+    """
     if target is not None and target in df.columns:
         nunique = df[target].nunique()
         if df[target].dtype == "object" or nunique <= 30:
@@ -138,9 +146,14 @@ def detect_task(df: pd.DataFrame, target: Optional[str] = None) -> dict:
 
 
 # ---------------------------------------------------------------------
-# 3. приведение строк к числам и препроцессинг
+# 3. Приведение строк к числам (пока не используется, но можно в будущем)
 # ---------------------------------------------------------------------
 def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Пытаемся аккуратно превратить "числовые строки" вида
+    '1 234', '12,5' в числа. Пока не вызывается в пайплайне,
+    но оставляем как полезный инструмент.
+    """
     new_df = df.copy()
     for col in new_df.columns:
         if new_df[col].dtype == "object":
@@ -155,6 +168,9 @@ def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return new_df
 
 
+# ---------------------------------------------------------------------
+# 4. Препроцессор
+# ---------------------------------------------------------------------
 def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
     numeric_features = X.select_dtypes(
         include=["int64", "float64", "int32", "float32"]
@@ -181,7 +197,7 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
 
 
 # ---------------------------------------------------------------------
-# 4. обучение базовой модели
+# 5. Обучение базовой модели
 # ---------------------------------------------------------------------
 def train_baseline(
     df: pd.DataFrame,
@@ -311,9 +327,8 @@ def train_baseline(
         return {"model_type": "skipped", "reason": f"Ошибка обучения: {e}"}
 
 
-
 # ---------------------------------------------------------------------
-# 5. отчёт
+# 6. Текстовый отчёт
 # ---------------------------------------------------------------------
 def build_report(
     df: pd.DataFrame,
@@ -412,7 +427,7 @@ def build_report(
 
 
 # ---------------------------------------------------------------------
-# 6. анализ проблем
+# 7. Анализ проблем в датасете
 # ---------------------------------------------------------------------
 def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
     problems: dict[str, object] = {}
@@ -508,6 +523,9 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
     return problems
 
 
+# ---------------------------------------------------------------------
+# 8. Роли колонок
+# ---------------------------------------------------------------------
 def detect_column_roles(df: pd.DataFrame, task: dict | None = None) -> dict:
     """
     Определяем "роль" каждой колонки:
@@ -597,10 +615,8 @@ def detect_column_roles(df: pd.DataFrame, task: dict | None = None) -> dict:
     return roles
 
 
-
-
 # ---------------------------------------------------------------------
-# 6.1 оценка здоровья датасета
+# 9. Оценка "здоровья" датасета
 # ---------------------------------------------------------------------
 def evaluate_dataset_health(eda: dict, problems: dict) -> dict:
     score = 100
@@ -643,7 +659,161 @@ def evaluate_dataset_health(eda: dict, problems: dict) -> dict:
 
 
 # ---------------------------------------------------------------------
-# 7. рекомендации
+# 10. План экспериментов (как сделал бы mid+ DS)
+# ---------------------------------------------------------------------
+def build_experiment_plan(
+    task: dict | None,
+    problems: dict | None,
+    dataset_health: dict | None,
+    model: dict | None,
+    column_roles: dict | None,
+) -> list[dict]:
+    """
+    Строим план экспериментов как сделал бы mid+ DS.
+    Формат шага:
+    {
+      "priority": "now" | "next" | "later",
+      "title": "Краткий заголовок",
+      "description": "Что сделать и зачем",
+      "tags": ["data", "model", "metrics"]
+    }
+    """
+    task = task or {}
+    problems = problems or {}
+    dataset_health = dataset_health or {}
+    column_roles = column_roles or {}
+
+    plan: list[dict] = []
+
+    def add(priority, title, description, tags=None):
+        plan.append({
+            "priority": priority,
+            "title": title,
+            "description": description,
+            "tags": tags or [],
+        })
+
+    # --- NOW: починить критичные проблемы с данными ---
+    if problems.get("target_has_nan"):
+        info = problems["target_has_nan"]
+        add(
+            "now",
+            "Очистить таргет от NaN",
+            f"В колонке {info.get('column')} {info.get('nan_count')} пропусков. "
+            "Удали строки с NaN или заполни их, иначе метрики будут искажены.",
+            ["data", "target"],
+        )
+
+    if problems.get("high_null_features"):
+        add(
+            "now",
+            "Обработать признаки с большими пропусками",
+            "Есть признаки с >30% пропусков. Реши: дропнуть их, заимпутить или добавить флаги 'is_null'.",
+            ["data", "missing"],
+        )
+
+    # дисбаланс классов
+    if problems.get("class_imbalance") and task.get("task") == "classification":
+        add(
+            "now",
+            "Сделать устойчивый train/test при дисбалансе",
+            "Используй stratify в train_test_split, class_weight='balanced' или oversampling (SMOTE/RandomOverSampler).",
+            ["data", "imbalance"],
+        )
+
+    # возможная утечка фич
+    leak_cols = [
+        c for c, info in column_roles.items()
+        if isinstance(info, dict) and info.get("possible_leakage")
+    ]
+    if leak_cols:
+        add(
+            "now",
+            "Проверить возможную утечку признаков",
+            "Найдены признаки, почти идеально коррелирующие с таргетом: "
+            + ", ".join(leak_cols[:5])
+            + ". Убедись, что это не «target в другой форме».",
+            ["data", "leakage"],
+        )
+
+    # --- NEXT: улучшение фич и моделей ---
+
+    # high cardinality → CatBoost / target encoding
+    if problems.get("high_cardinality"):
+        add(
+            "next",
+            "Обработать high-cardinality категориальные признаки",
+            "Для колонок с очень большим числом значений попробуй CatBoost или target/frequency encoding, "
+            "чтобы не раздувать one-hot.",
+            ["features", "categorical"],
+        )
+
+    # datetime
+    has_datetime = any(
+        isinstance(info, dict) and info.get("role") == "datetime"
+        for info in column_roles.values()
+    )
+    if has_datetime:
+        add(
+            "next",
+            "Сделать time-based фичи и сплит",
+            "Из дат выдели year/month/day/dayofweek, is_weekend. "
+            "Для временных рядов используй TimeSeriesSplit вместо обычного сплита.",
+            ["features", "datetime"],
+        )
+
+    # text
+    has_text = any(
+        isinstance(info, dict) and info.get("role") == "text"
+        for info in column_roles.values()
+    )
+    if has_text:
+        add(
+            "next",
+            "Обработать текстовые признаки",
+            "Для текстовых колонок попробуй TF-IDF + линейную модель или text-эмбеддинги. "
+            "Сейчас они, вероятно, игнорируются/кодируются грубо.",
+            ["features", "text"],
+        )
+
+    # модель: апгрейд с RF
+    if model and model.get("model_type") in ("RandomForestClassifier", "RandomForestRegressor"):
+        add(
+            "next",
+            "Попробовать бустинг и подбор гиперпараметров",
+            "Текущая модель — RandomForest. Следующий шаг — XGBoost/LightGBM/CatBoost "
+            "с подбором гиперпараметров (GridSearchCV/Optuna).",
+            ["model", "tuning"],
+        )
+
+    # --- LATER: метрики и продакшен ---
+    if task.get("task") == "classification":
+        add(
+            "later",
+            "Добавить продвинутые метрики",
+            "Помимо accuracy и F1, посчитай ROC-AUC и PR-AUC, особенно при дисбалансе.",
+            ["metrics"],
+        )
+    elif task.get("task") == "regression":
+        add(
+            "later",
+            "Проверить R², MAE и распределение ошибок",
+            "Посмотри, не заваливается ли модель на крайних значениях таргета, построй plot y_true vs y_pred.",
+            ["metrics"],
+        )
+
+    add(
+        "later",
+        "Задуматься о продакшен-пайплайне",
+        "Когда качество устроит — заверни модель в отдельный сервис с версионированием, мониторингом и логами.",
+        ["production"],
+    )
+
+    return plan
+
+
+# ---------------------------------------------------------------------
+# 11. Текстовые рекомендации по датасету
 # ---------------------------------------------------------------------
 def build_recommendations(
     df: pd.DataFrame,
@@ -735,7 +905,7 @@ def build_recommendations(
 
 
 # ---------------------------------------------------------------------
-# 8. графики → base64
+# 12. Графики → base64
 # ---------------------------------------------------------------------
 def make_plots_base64(df: pd.DataFrame) -> list[dict]:
     plots: list[dict] = []
@@ -774,7 +944,7 @@ def make_plots_base64(df: pd.DataFrame) -> list[dict]:
 
 
 # ---------------------------------------------------------------------
-# 9. сохранение на диск
+# 13. Сохранение запуска на диск
 # ---------------------------------------------------------------------
 def save_run(run_data: dict, model_pipeline) -> str:
     run_id = str(uuid.uuid4())
@@ -791,7 +961,7 @@ def save_run(run_data: dict, model_pipeline) -> str:
 
 
 # ---------------------------------------------------------------------
-# 10. Краткий статус и next actions
+# 14. Краткий статус и next actions
 # ---------------------------------------------------------------------
 def build_analysis_status(task: dict, problems: dict, model: dict | None) -> dict:
     problems = problems or {}
@@ -869,198 +1039,8 @@ def build_next_actions(task: dict, problems: dict, model: dict | None) -> list[s
     return actions
 
 
-
-def summarize_target(df: pd.DataFrame, task: dict) -> dict:
-    """
-    Короткая сводка по таргету:
-      - имя
-      - число уникальных значений
-      - топ-значения (до 10)
-      - share самого частого класса
-    Если таргета нет — вернём пустой dict.
-    """
-    target = task.get("target")
-    if not target or target not in df.columns:
-        return {}
-
-    ser = df[target]
-    # уберём NaN для подсчёта
-    ser_no_na = ser.dropna()
-
-    summary: dict = {
-        "target": target,
-        "n_unique": int(ser_no_na.nunique()),
-    }
-
-    # частоты
-    vc = ser_no_na.value_counts(dropna=False)
-    top_items = []
-    for val, cnt in vc.iloc[:10].items():
-        top_items.append({
-            "value": str(val),
-            "count": int(cnt),
-            "share": float(cnt / max(1, len(ser_no_na)))
-        })
-    summary["top_values"] = top_items
-
-    # доминирование одного класса
-    if len(vc) > 0:
-        most_common = vc.iloc[0]
-        summary["max_class_share"] = float(most_common / max(1, len(ser_no_na)))
-    else:
-        summary["max_class_share"] = 0.0
-
-    return summary
-
-
-def rank_problems(problems: dict) -> list[dict]:
-    """
-    Преобразуем наш dict проблем в список структур
-    c приоритетом. Это удобно фронту.
-    """
-    if not problems:
-        return []
-
-    ranked: list[dict] = []
-
-    # высокий приоритет
-    if problems.get("target_has_nan"):
-        ranked.append({
-            "level": "high",
-            "code": "target_has_nan",
-            "details": problems["target_has_nan"],
-            "message": "В таргете есть пропуски — их надо убрать перед обучением.",
-        })
-
-    if problems.get("class_imbalance"):
-        ranked.append({
-            "level": "high",
-            "code": "class_imbalance",
-            "details": problems["class_imbalance"],
-            "message": "Сильный дисбаланс классов — используй class_weight/oversampling.",
-        })
-
-    # средний
-    if problems.get("high_null_features"):
-        ranked.append({
-            "level": "medium",
-            "code": "high_null_features",
-            "details": problems["high_null_features"],
-            "message": "Есть признаки с >30% пропусков — заполни или удали.",
-        })
-
-    if problems.get("high_cardinality"):
-        ranked.append({
-            "level": "medium",
-            "code": "high_cardinality",
-            "details": problems["high_cardinality"],
-            "message": "Высокая кардинальность категорий — лучше CatBoost/target encoding.",
-        })
-
-    # низкий
-    if problems.get("constant_features") or problems.get("quasi_constant_features"):
-        ranked.append({
-            "level": "low",
-            "code": "low_variance",
-            "details": {
-                "constant": problems.get("constant_features"),
-                "quasi_constant": problems.get("quasi_constant_features"),
-            },
-            "message": "Есть константные / почти константные признаки — можно удалить.",
-        })
-
-    if problems.get("high_corr_pairs"):
-        ranked.append({
-            "level": "low",
-            "code": "high_corr_pairs",
-            "details": problems.get("high_corr_pairs"),
-            "message": "Есть сильно коррелирующие признаки — сделай отбор фич.",
-        })
-
-    return ranked
-
-
-
-def auto_feature_suggestions(df: pd.DataFrame) -> list[str]:
-    """
-    Очень простые подсказки, какие фичи можно докрутить.
-    Это не меняет df, это просто идеи для пользователя/агента.
-    """
-    suggestions: list[str] = []
-
-    # даты
-    for col in df.columns:
-        if "date" in col.lower() or "time" in col.lower() or "timestamp" in col.lower():
-            suggestions.append(
-                f"Из колонки {col} можно вынести year/month/day/dayofweek и, возможно, признак 'is_weekend'."
-            )
-
-    # большие категориальные
-    obj_cols = df.select_dtypes(include=["object"]).columns
-    for col in obj_cols:
-        nun = df[col].nunique(dropna=True)
-        if nun > 200:
-            suggestions.append(
-                f"Категориальная колонка {col} имеет много значений ({nun}) — стоит использовать target/frequency encoding или CatBoost."
-            )
-        elif 2 < nun <= 50:
-            suggestions.append(
-                f"Колонка {col} — аккуратная категориальная, можно one-hot (у тебя это уже есть в пайплайне)."
-            )
-
-    # числовые с пропусками
-    null_frac = df.isna().mean()
-    for col, frac in null_frac.items():
-        if frac > 0.0 and col not in obj_cols:
-            suggestions.append(
-                f"В числовой колонке {col} есть пропуски ({frac:.1%}) — можно добавить бинарный флаг 'is_{col}_missing'."
-            )
-
-    if not suggestions:
-        suggestions.append("Явных идей по новым фичам нет — можно переходить к отбору признаков/моделям.")
-
-    return suggestions
-
-
-def extract_feature_importance(pipeline) -> list[dict]:
-    """
-    Достаём топ-важные признаки из обученного pipeline, если модель умеет feature_importances_.
-    Возвращаем список словарей: {"feature": ..., "importance": ...}
-    Если достать нельзя — возвращаем пустой список.
-    """
-    try:
-        # у нас в pipeline шаги: ("preprocess", ...), ("model", RandomForest...)
-        model = pipeline.named_steps.get("model")
-        preprocess = pipeline.named_steps.get("preprocess")
-
-        if model is None or not hasattr(model, "feature_importances_"):
-            return []
-
-        importances = model.feature_importances_
-
-        # нужно восстановить имена фич после ColumnTransformer + OneHotEncoder
-        feature_names: list[str] = []
-        if hasattr(preprocess, "get_feature_names_out"):
-            feature_names = list(preprocess.get_feature_names_out())
-        else:
-            # fallback — просто пронумеруем
-            feature_names = [f"feature_{i}" for i in range(len(importances))]
-
-        items = []
-        for name, imp in zip(feature_names, importances):
-            items.append({"feature": str(name), "importance": float(imp)})
-
-        # отсортируем по важности
-        items.sort(key=lambda x: x["importance"], reverse=True)
-
-        # можно сразу ограничить топ-50
-        return items[:50]
-    except Exception:
-        return []
-
-
 # ---------------------------------------------------------------------
-# 11. Краткая сводка по таргету
+# 15. Сводка по таргету
 # ---------------------------------------------------------------------
 def summarize_target(df: pd.DataFrame, task: dict) -> dict:
     """
@@ -1135,7 +1115,7 @@ def summarize_target(df: pd.DataFrame, task: dict) -> dict:
 
 
 # ---------------------------------------------------------------------
-# 12. Ранжирование проблем по важности
+# 16. Ранжирование проблем по важности
 # ---------------------------------------------------------------------
 def rank_problems(problems: dict) -> list[dict]:
     """
@@ -1218,7 +1198,93 @@ def rank_problems(problems: dict) -> list[dict]:
     return ranked
 
 
+# ---------------------------------------------------------------------
+# 17. Авто-подсказки по фичам
+# ---------------------------------------------------------------------
+def auto_feature_suggestions(df: pd.DataFrame) -> list[str]:
+    """
+    Очень простые подсказки, какие фичи можно докрутить.
+    Это не меняет df, это просто идеи для пользователя/агента.
+    """
+    suggestions: list[str] = []
 
+    # даты
+    for col in df.columns:
+        if "date" in col.lower() or "time" in col.lower() or "timestamp" in col.lower():
+            suggestions.append(
+                f"Из колонки {col} можно вынести year/month/day/dayofweek и, возможно, признак 'is_weekend'."
+            )
+
+    # большие категориальные
+    obj_cols = df.select_dtypes(include=["object"]).columns
+    for col in obj_cols:
+        nun = df[col].nunique(dropna=True)
+        if nun > 200:
+            suggestions.append(
+                f"Категориальная колонка {col} имеет много значений ({nun}) — стоит использовать target/frequency encoding или CatBoost."
+            )
+        elif 2 < nun <= 50:
+            suggestions.append(
+                f"Колонка {col} — аккуратная категориальная, можно one-hot (у тебя это уже есть в пайплайне)."
+            )
+
+    # числовые с пропусками
+    null_frac = df.isna().mean()
+    for col, frac in null_frac.items():
+        if frac > 0.0 and col not in obj_cols:
+            suggestions.append(
+                f"В числовой колонке {col} есть пропуски ({frac:.1%}) — можно добавить бинарный флаг 'is_{col}_missing'."
+            )
+
+    if not suggestions:
+        suggestions.append("Явных идей по новым фичам нет — можно переходить к отбору признаков/моделям.")
+
+    return suggestions
+
+
+# ---------------------------------------------------------------------
+# 18. Важность фич
+# ---------------------------------------------------------------------
+def extract_feature_importance(pipeline) -> list[dict]:
+    """
+    Достаём топ-важные признаки из обученного pipeline, если модель умеет feature_importances_.
+    Возвращаем список словарей: {"feature": ..., "importance": ...}
+    Если достать нельзя — возвращаем пустой список.
+    """
+    try:
+        # у нас в pipeline шаги: ("preprocess", ...), ("model", RandomForest...)
+        model = pipeline.named_steps.get("model")
+        preprocess = pipeline.named_steps.get("preprocess")
+
+        if model is None or not hasattr(model, "feature_importances_"):
+            return []
+
+        importances = model.feature_importances_
+
+        # нужно восстановить имена фич после ColumnTransformer + OneHotEncoder
+        feature_names: list[str] = []
+        if hasattr(preprocess, "get_feature_names_out"):
+            feature_names = list(preprocess.get_feature_names_out())
+        else:
+            # fallback — просто пронумеруем
+            feature_names = [f"feature_{i}" for i in range(len(importances))]
+
+        items = []
+        for name, imp in zip(feature_names, importances):
+            items.append({"feature": str(name), "importance": float(imp)})
+
+        # отсортируем по важности
+        items.sort(key=lambda x: x["importance"], reverse=True)
+
+        # можно сразу ограничить топ-50
+        return items[:50]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------
+# 19. Код-подсказки (snippets) под типичные проблемы
+# ---------------------------------------------------------------------
 def build_code_hints(problems: dict, task: dict) -> list[dict]:
     """
     Возвращаем список "код-подсказок", чтобы фронт мог показать
