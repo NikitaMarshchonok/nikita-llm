@@ -101,6 +101,21 @@
     input[type="text"]:focus {
       border-color: rgba(99, 102, 241, 0.8);
     }
+    textarea {
+      width: 100%;
+      background: var(--bg-light);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      border-radius: 8px;
+      padding: 6px 8px;
+      color: var(--text);
+      outline: none;
+      font-size: 12px;
+      resize: vertical;
+      min-height: 70px;
+    }
+    textarea:focus {
+      border-color: rgba(99, 102, 241, 0.8);
+    }
     button {
       background: var(--accent);
       border: none;
@@ -222,6 +237,13 @@
       color: var(--text-muted);
     }
 
+    .agent-answer {
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--text-muted);
+      white-space: pre-wrap;
+    }
+
     /* стили для кода */
     details summary {
       cursor: pointer;
@@ -252,7 +274,9 @@
       <h1 style="font-size: 18px; font-weight: 600; margin:0;">Nikita DS Agent</h1>
       <span class="badge">beta</span>
     </div>
-    <small style="color:var(--text-muted); font-size:12px;">CSV → EDA → baseline → сохранение запусков</small>
+    <small style="color:var(--text-muted); font-size:12px;">
+      CSV → EDA → baseline → сохранение запусков → вопросы к агенту
+    </small>
   </header>
 
   <main>
@@ -283,13 +307,22 @@
       <div class="plots-row" id="plotsRow"></div>
     </section>
 
-    <!-- справа: список запусков -->
+    <!-- справа: список запусков + вопрос к агенту -->
     <aside class="right-panel">
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <div class="runs-title">Последние загрузки</div>
         <button style="width:auto; padding:3px 8px; font-size:11px;" onclick="loadRuns()">↻</button>
       </div>
       <div id="runsList" style="min-height:60px;"></div>
+
+      <hr style="border:0; border-top:1px solid rgba(148,163,184,0.15); margin:10px 0 8px;">
+
+      <div class="runs-title" style="margin-bottom:6px;">Спросить DS-агента</div>
+      <textarea id="agentQuestion" placeholder="Например: Что мне сделать, чтобы улучшить качество модели?"></textarea>
+      <button id="askAgentBtn" style="margin-top:6px;" onclick="askAgent()">Спросить</button>
+      <div id="agentAnswer" class="agent-answer">
+        Здесь появится ответ агента по выбранному run_id.
+      </div>
     </aside>
   </main>
 
@@ -301,6 +334,10 @@
     const uploadBtn   = document.getElementById('uploadBtn');
     const recsBox     = document.getElementById('recs');
     const mlHintsBox  = document.getElementById('mlHints');
+
+    const agentQuestion = document.getElementById('agentQuestion');
+    const askAgentBtn   = document.getElementById('askAgentBtn');
+    const agentAnswer   = document.getElementById('agentAnswer');
 
     let currentRunId = null;
 
@@ -346,6 +383,9 @@
         renderMLHints(data);
         renderPlots(data);
         loadRuns();
+
+        // сбрасываем старый ответ агента, чтобы было понятно, что контекст сменился
+        agentAnswer.textContent = 'Загружен новый run. Теперь можешь задать вопрос по этому запуску.';
 
       } catch (err) {
         console.error(err);
@@ -505,11 +545,53 @@
         renderRecommendations(data);
         renderMLHints(data);
         renderPlots(data);
+
         Array.from(runsList.children).forEach(ch => {
           ch.classList.toggle('active', ch.textContent.includes(runId));
         });
+
+        agentAnswer.textContent = 'Выбран run ' + runId + '. Теперь можно задать вопрос по этому запуску.';
+
       } catch (e) {
         console.warn('cannot load run', e);
+      }
+    }
+
+    async function askAgent() {
+      const q = agentQuestion.value.trim();
+      if (!currentRunId) {
+        agentAnswer.textContent = 'Сначала выбери запуск справа или загрузите новый CSV.';
+        return;
+      }
+      if (!q) {
+        agentAnswer.textContent = 'Напиши вопрос, чтобы агент мог ответить.';
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('run_id', currentRunId);
+      formData.append('question', q);
+
+      askAgentBtn.disabled = true;
+      agentAnswer.textContent = 'Агент думает...';
+
+      try {
+        const resp = await fetch('/ask', {
+          method: 'POST',
+          body: formData,
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          agentAnswer.textContent = 'Ошибка: ' + (data.detail?.details || data.detail || 'что-то пошло не так');
+          return;
+        }
+
+        agentAnswer.textContent = data.answer || '(пустой ответ от агента)';
+      } catch (e) {
+        agentAnswer.textContent = 'Ошибка сети: ' + e;
+      } finally {
+        askAgentBtn.disabled = false;
       }
     }
 

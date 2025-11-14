@@ -77,6 +77,60 @@ def read_csv_safely(file_bytes: bytes) -> pd.DataFrame:
     raise ValueError("Не удалось прочитать CSV ни с одной комбинацией кодировка/разделитель")
 
 
+def read_any_table(file_bytes: bytes, filename: str | None) -> pd.DataFrame:
+    """
+    Универсальный загрузчик табличных данных:
+    CSV / TXT / Excel / JSON / Parquet.
+    При любой ошибке откатываемся к read_csv_safely.
+    """
+    ext = (os.path.splitext(filename or "")[1] or "").lower()
+    bio = BytesIO(file_bytes)
+
+    # 1) CSV / TXT
+    if ext in [".csv", ".txt"]:
+        return read_csv_safely(file_bytes)
+
+    # 2) Excel
+    if ext in [".xlsx", ".xls"]:
+        try:
+            bio.seek(0)
+            df = pd.read_excel(bio)
+            if df.shape[1] > 0:
+                return df
+        except Exception:
+            pass  # упадём в fallback ниже
+
+    # 3) Parquet
+    if ext in [".parquet", ".pq"]:
+        try:
+            bio.seek(0)
+            df = pd.read_parquet(bio)
+            if df.shape[1] > 0:
+                return df
+        except Exception:
+            pass
+
+    # 4) JSON / JSONL
+    if ext in [".json"]:
+        try:
+            bio.seek(0)
+            # сначала пытаемся jsonl
+            df = pd.read_json(bio, lines=True)
+            if df.shape[1] > 0:
+                return df
+        except Exception:
+            try:
+                bio.seek(0)
+                df = pd.read_json(bio)
+                if df.shape[1] > 0:
+                    return df
+            except Exception:
+                pass
+
+    # 5) fallback — как CSV
+    return read_csv_safely(file_bytes)
+
+
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [
