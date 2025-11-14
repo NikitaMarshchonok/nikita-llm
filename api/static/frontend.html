@@ -62,11 +62,11 @@
       flex: 1;
       display: flex;
       flex-direction: column;
-      gap: 16px;
+      gap: 10px;
       height: calc(100vh - 90px);
     }
     .right-panel {
-      width: 240px;
+      width: 260px;
       background: var(--card);
       border-radius: var(--radius);
       padding: 14px;
@@ -88,7 +88,7 @@
       color: var(--text-muted);
       font-size: 13px;
     }
-    input[type="text"] {
+    input[type="text"], textarea {
       width: 100%;
       background: var(--bg-light);
       border: 1px solid rgba(148, 163, 184, 0.2);
@@ -97,24 +97,11 @@
       color: var(--text);
       outline: none;
       font-size: 13px;
-    }
-    input[type="text"]:focus {
-      border-color: rgba(99, 102, 241, 0.8);
-    }
-    textarea {
-      width: 100%;
-      background: var(--bg-light);
-      border: 1px solid rgba(148, 163, 184, 0.2);
-      border-radius: 8px;
-      padding: 6px 8px;
-      color: var(--text);
-      outline: none;
-      font-size: 12px;
       resize: vertical;
-      min-height: 70px;
     }
+    input[type="text"]:focus,
     textarea:focus {
-      border-color: rgba(99, 102, 241, 0.8);
+      border-color: rgba(99, 102, 241, 0.9);
     }
     button {
       background: var(--accent);
@@ -132,7 +119,7 @@
       cursor: not-allowed;
     }
     button:hover:not(:disabled) {
-      filter: brightness(1.02);
+      filter: brightness(1.05);
     }
     .status-ok {
       font-size: 12px;
@@ -151,8 +138,8 @@
       background: var(--card);
       border-radius: var(--radius);
       padding: 14px 16px;
-      height: 38%;
-      min-height: 200px;
+      height: 34%;
+      min-height: 180px;
       overflow-y: auto;
       white-space: pre-wrap;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
@@ -161,10 +148,10 @@
     }
     .recs-box {
       background: rgba(15, 23, 42, 0.3);
-      border: 1px solid rgba(148, 163, 184, 0.03);
+      border: 1px solid rgba(148, 163, 184, 0.06);
       border-radius: var(--radius);
       padding: 10px 14px 12px;
-      min-height: 60px;
+      min-height: 56px;
       max-height: 110px;
       overflow-y: auto;
       font-size: 12px;
@@ -188,7 +175,7 @@
     .plots-row {
       display: flex;
       gap: 16px;
-      height: 40%;
+      height: 32%;
       overflow-x: auto;
     }
     .plot-card {
@@ -217,15 +204,15 @@
     }
     .run-item {
       background: rgba(15, 23, 42, 0.2);
-      border: 1px solid rgba(148, 163, 184, 0.03);
+      border: 1px solid rgba(148, 163, 184, 0.05);
       border-radius: 10px;
       padding: 6px 8px;
       margin-bottom: 6px;
       cursor: pointer;
     }
     .run-item.active {
-      border-color: rgba(99, 102, 241, 0.6);
-      background: rgba(99, 102, 241, 0.1);
+      border-color: rgba(99, 102, 241, 0.8);
+      background: rgba(99, 102, 241, 0.15);
     }
     .run-item small {
       display: block;
@@ -237,14 +224,29 @@
       color: var(--text-muted);
     }
 
+    .agent-panel {
+      margin-top: 14px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(148,163,184,0.15);
+    }
     .agent-answer {
-      margin-top: 6px;
+      margin-top: 8px;
       font-size: 12px;
-      color: var(--text-muted);
       white-space: pre-wrap;
+      background: rgba(15,23,42,0.4);
+      border-radius: 10px;
+      padding: 8px 10px;
+      border: 1px solid rgba(148,163,184,0.08);
+      max-height: 220px;
+      overflow-y: auto;
+    }
+    .agent-hint {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
     }
 
-    /* стили для кода */
+    /* стили для кода в ML-подсказках */
     details summary {
       cursor: pointer;
       user-select: none;
@@ -274,40 +276,42 @@
       <h1 style="font-size: 18px; font-weight: 600; margin:0;">Nikita DS Agent</h1>
       <span class="badge">beta</span>
     </div>
-    <small style="color:var(--text-muted); font-size:12px;">
-      CSV → EDA → baseline → сохранение запусков → вопросы к агенту
-    </small>
+    <small style="color:var(--text-muted); font-size:12px;">CSV/Excel/JSON → EDA → baseline → сохранение запусков → вопросы к агенту</small>
   </header>
 
   <main>
     <!-- левая панель: загрузка -->
     <section class="left-panel">
       <h2 style="font-size:14px; margin:0 0 4px;">Загрузка датасета</h2>
-      <p style="font-size:12px; color:var(--text-muted); margin:0 0 8px;">CSV-файл + (опционально) имя target.</p>
+      <p style="font-size:12px; color:var(--text-muted); margin:0 0 8px;">Файл с табличными данными + (опционально) имя таргета.</p>
 
-      <label for="file">CSV файл</label>
-      <input id="file" type="file" accept=".csv" />
+      <label for="file">Файл (CSV / Excel / JSON / Parquet)</label>
+      <input id="file" type="file" />
 
       <label for="target">Target (необязательно)</label>
       <input id="target" type="text" placeholder="например, price или label" />
 
       <button id="uploadBtn" onclick="uploadDataset()">Отправить</button>
       <div id="status" style="min-height:22px; margin-top:4px; font-size:12px;"></div>
-      <small style="font-size:11px; color:var(--text-muted);">Файл отправляется на <code>/upload</code>, бэкенд делает EDA и модель.</small>
+      <small style="font-size:11px; color:var(--text-muted);">Файл отправляется на <code>/upload</code>, бэкенд делает EDA и базовую модель.</small>
     </section>
 
-    <!-- центр: отчёт + рекомендации + ML-подсказки + графики -->
+    <!-- центр: отчёт + здоровье + рекомендации + ML-подсказки + план + графики -->
     <section class="middle-panel">
       <div class="report-box" id="reportBox">Здесь появится отчёт ✨</div>
+
+      <div class="recs-box" id="healthBox"></div>
 
       <div class="recs-box" id="recs"></div>
 
       <div class="recs-box" id="mlHints"></div>
 
+      <div class="recs-box" id="planBox"></div>
+
       <div class="plots-row" id="plotsRow"></div>
     </section>
 
-    <!-- справа: список запусков + вопрос к агенту -->
+    <!-- справа: список запусков + вопросы к агенту -->
     <aside class="right-panel">
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <div class="runs-title">Последние загрузки</div>
@@ -315,28 +319,29 @@
       </div>
       <div id="runsList" style="min-height:60px;"></div>
 
-      <hr style="border:0; border-top:1px solid rgba(148,163,184,0.15); margin:10px 0 8px;">
-
-      <div class="runs-title" style="margin-bottom:6px;">Спросить DS-агента</div>
-      <textarea id="agentQuestion" placeholder="Например: Что мне сделать, чтобы улучшить качество модели?"></textarea>
-      <button id="askAgentBtn" style="margin-top:6px;" onclick="askAgent()">Спросить</button>
-      <div id="agentAnswer" class="agent-answer">
-        Здесь появится ответ агента по выбранному run_id.
+      <div class="agent-panel">
+        <div class="runs-title" style="margin-bottom:4px;">Спросить DS-агента</div>
+        <div class="agent-hint">
+          Например: <em>Что мне сделать, чтобы улучшить качество модели?</em>
+        </div>
+        <textarea id="agentQuestion" rows="3" placeholder="Напиши вопрос по текущему run_id..."></textarea>
+        <button style="margin-top:6px;" onclick="askAgent()">Спросить</button>
+        <div id="agentAnswer" class="agent-answer" style="margin-top:8px;"></div>
       </div>
     </aside>
   </main>
 
   <script>
-    const reportBox   = document.getElementById('reportBox');
-    const plotsRow    = document.getElementById('plotsRow');
-    const statusEl    = document.getElementById('status');
-    const runsList    = document.getElementById('runsList');
-    const uploadBtn   = document.getElementById('uploadBtn');
-    const recsBox     = document.getElementById('recs');
-    const mlHintsBox  = document.getElementById('mlHints');
-
+    const reportBox     = document.getElementById('reportBox');
+    const plotsRow      = document.getElementById('plotsRow');
+    const statusEl      = document.getElementById('status');
+    const runsList      = document.getElementById('runsList');
+    const uploadBtn     = document.getElementById('uploadBtn');
+    const recsBox       = document.getElementById('recs');
+    const mlHintsBox    = document.getElementById('mlHints');
+    const healthBox     = document.getElementById('healthBox');
+    const planBox       = document.getElementById('planBox');
     const agentQuestion = document.getElementById('agentQuestion');
-    const askAgentBtn   = document.getElementById('askAgentBtn');
     const agentAnswer   = document.getElementById('agentAnswer');
 
     let currentRunId = null;
@@ -354,7 +359,7 @@
       const file       = fileInput.files[0];
 
       if (!file) {
-        statusEl.innerHTML = '<span class="status-err">Сначала выбери CSV</span>';
+        statusEl.innerHTML = '<span class="status-err">Сначала выбери файл с данными</span>';
         return;
       }
 
@@ -363,14 +368,15 @@
       formData.append('target', targetInput.value || '');
 
       uploadBtn.disabled = true;
-      statusEl.innerHTML = '<span style="font-size:12px; color:var(--text-muted);">Загружаем...</span>';
+      statusEl.innerHTML = '<span style="font-size:12px; color:var(--text-muted);">Загружаем и считаем EDA...</span>';
 
       try {
         const resp = await fetch('/upload', { method: 'POST', body: formData });
         const data = await resp.json();
 
         if (!resp.ok) {
-          statusEl.innerHTML = '<div class="status-err">Ошибка: ' + (data.detail?.details || 'неизвестно') + '</div>';
+          const msg = data.detail?.details || data.detail || 'неизвестно';
+          statusEl.innerHTML = '<div class="status-err">Ошибка: ' + escapeHtml(msg) + '</div>';
           uploadBtn.disabled = false;
           return;
         }
@@ -379,13 +385,12 @@
         currentRunId = data.run_id;
 
         renderReport(data);
+        renderHealth(data);
         renderRecommendations(data);
         renderMLHints(data);
+        renderExperimentPlan(data);
         renderPlots(data);
         loadRuns();
-
-        // сбрасываем старый ответ агента, чтобы было понятно, что контекст сменился
-        agentAnswer.textContent = 'Загружен новый run. Теперь можешь задать вопрос по этому запуску.';
 
       } catch (err) {
         console.error(err);
@@ -418,6 +423,32 @@
       reportBox.textContent = txt;
     }
 
+    function renderHealth(data) {
+      const health = data.dataset_health;
+      if (!health) {
+        healthBox.innerHTML = '<span style="color:var(--text-muted);">Оценка здоровья датасета недоступна.</span>';
+        return;
+      }
+      const levelMap = { green: 'зелёный', yellow: 'жёлтый', red: 'красный' };
+      const colorMap = { green: '#22c55e', yellow: '#eab308', red: '#f97316' };
+      const level = health.level || 'yellow';
+      const score = health.score ?? '?';
+      const reasons = health.reasons || [];
+
+      let html = '<h4>Оценка здоровья датасета</h4>';
+      html += `<div style="font-size:12px; margin-bottom:4px;">
+        <span style="font-weight:600; color:${colorMap[level] || 'var(--accent)'};">
+          ${score}/100 · ${levelMap[level] || level}
+        </span>
+      </div>`;
+      if (reasons.length) {
+        html += '<ul>' + reasons.map(r => `<li>${escapeHtml(r)}</li>`).join('') + '</ul>';
+      } else {
+        html += '<span style="color:var(--text-muted);">Серьёзных проблем не найдено.</span>';
+      }
+      healthBox.innerHTML = html;
+    }
+
     function renderRecommendations(data) {
       recsBox.innerHTML = '';
       const recs = data.recommendations;
@@ -437,7 +468,6 @@
       recsBox.appendChild(ul);
     }
 
-    // важность фич, идеи фич и код-подсказки
     function renderMLHints(data) {
       mlHintsBox.innerHTML = '';
       const parts = [];
@@ -472,7 +502,7 @@
             html += `<li>${escapeHtml(hint)}</li>`;
           } else if (hint && typeof hint === 'object') {
             const title = hint.title || hint.name || 'snippet';
-            const code  = hint.code  || hint.snippet || hint.text || '';
+            const code  = hint.code || hint.snippet || hint.text || '';
             html += `<li>
               <details>
                 <summary>${escapeHtml(title)}</summary>
@@ -490,6 +520,40 @@
       mlHintsBox.innerHTML = parts.length
         ? parts.join('<hr style="border:0; border-top:1px solid rgba(148,163,184,0.05); margin:6px 0;">')
         : '<span style="color:var(--text-muted);">Пока нечего подсказать по фичам/коду.</span>';
+    }
+
+    function renderExperimentPlan(data) {
+      const plan = data.experiment_plan;
+      planBox.innerHTML = '';
+      if (!Array.isArray(plan) || plan.length === 0) {
+        planBox.innerHTML = '<span style="color:var(--text-muted);">План экспериментов ещё не построен.</span>';
+        return;
+      }
+
+      const groups = { now: [], next: [], later: [] };
+      plan.forEach(step => {
+        const p = step.priority || 'next';
+        (groups[p] || groups.next).push(step);
+      });
+
+      let html = '<h4>План экспериментов</h4>';
+
+      function block(title, key, emoji) {
+        const arr = groups[key];
+        if (!arr || arr.length === 0) return '';
+        let out = `<div style="margin-top:4px; margin-bottom:2px; font-size:12px; font-weight:600;">${emoji} ${title}</div><ul>`;
+        arr.slice(0, 5).forEach(step => {
+          out += `<li><strong>${escapeHtml(step.title || '')}</strong>: ${escapeHtml(step.description || '')}</li>`;
+        });
+        out += '</ul>';
+        return out;
+      }
+
+      html += block('Сделать сейчас', 'now', '🔥');
+      html += block('Дальше', 'next', '➡️');
+      html += block('Потом', 'later', '🕒');
+
+      planBox.innerHTML = html;
     }
 
     function renderPlots(data) {
@@ -524,9 +588,9 @@
           div.className = 'run-item' + (run.run_id === currentRunId ? ' active' : '');
           div.onclick = () => selectRun(run.run_id);
           div.innerHTML = `
-            <div style="font-size:12px;">${run.filename || '(без имени)'}</div>
-            <small>${run.run_id}</small>
-            <small>${run.task ? (run.task.task + (run.task.target ? ' · ' + run.task.target : '')) : ''}</small>
+            <div style="font-size:12px;">${escapeHtml(run.filename || '(без имени)')}</div>
+            <small>${escapeHtml(run.run_id)}</small>
+            <small>${run.task ? escapeHtml(run.task.task + (run.task.target ? ' · ' + run.task.target : '')) : ''}</small>
           `;
           runsList.appendChild(div);
         });
@@ -541,30 +605,30 @@
         if (!resp.ok) return;
         const data = await resp.json();
         currentRunId = runId;
+
         renderReport(data);
+        renderHealth(data);
         renderRecommendations(data);
         renderMLHints(data);
+        renderExperimentPlan(data);
         renderPlots(data);
 
         Array.from(runsList.children).forEach(ch => {
           ch.classList.toggle('active', ch.textContent.includes(runId));
         });
-
-        agentAnswer.textContent = 'Выбран run ' + runId + '. Теперь можно задать вопрос по этому запуску.';
-
       } catch (e) {
         console.warn('cannot load run', e);
       }
     }
 
     async function askAgent() {
-      const q = agentQuestion.value.trim();
+      const q = (agentQuestion.value || '').trim();
       if (!currentRunId) {
-        agentAnswer.textContent = 'Сначала выбери запуск справа или загрузите новый CSV.';
+        agentAnswer.textContent = 'Сначала запусти анализ (загрузи датасет), чтобы появился run_id.';
         return;
       }
       if (!q) {
-        agentAnswer.textContent = 'Напиши вопрос, чтобы агент мог ответить.';
+        agentAnswer.textContent = 'Напиши вопрос для агента.';
         return;
       }
 
@@ -572,29 +636,24 @@
       formData.append('run_id', currentRunId);
       formData.append('question', q);
 
-      askAgentBtn.disabled = true;
-      agentAnswer.textContent = 'Агент думает...';
+      agentAnswer.textContent = 'Думаю над ответом...';
 
       try {
-        const resp = await fetch('/ask', {
-          method: 'POST',
-          body: formData,
-        });
+        const resp = await fetch('/ask', { method: 'POST', body: formData });
         const data = await resp.json();
-
         if (!resp.ok) {
-          agentAnswer.textContent = 'Ошибка: ' + (data.detail?.details || data.detail || 'что-то пошло не так');
+          const msg = data.detail || 'Ошибка запроса к /ask';
+          agentAnswer.textContent = 'Ошибка: ' + (typeof msg === 'string' ? msg : JSON.stringify(msg));
           return;
         }
-
-        agentAnswer.textContent = data.answer || '(пустой ответ от агента)';
+        agentAnswer.textContent = data.answer || '(пустой ответ)';
       } catch (e) {
-        agentAnswer.textContent = 'Ошибка сети: ' + e;
-      } finally {
-        askAgentBtn.disabled = false;
+        console.error(e);
+        agentAnswer.textContent = 'Ошибка сети при обращении к /ask.';
       }
     }
 
+    // загрузим список запусков при открытии
     loadRuns();
   </script>
 </body>

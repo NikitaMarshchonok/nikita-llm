@@ -38,7 +38,7 @@ from agent.tools import (
 # ---------------------------
 app = FastAPI(
     title="Nikita DS Agent",
-    description="Загрузи файл с данными → получи EDA, базовую модель и умный план действий",
+    description="Загрузи CSV/Excel/JSON/Parquet → получи EDA, базовую модель и инференс",
     version="0.3.0",
 )
 app.add_middleware(
@@ -55,7 +55,7 @@ PIPELINES: Dict[str, Any] = {}
 
 
 # ---------------------------
-# Utils
+# Utils: чтение файлов
 # ---------------------------
 def read_csv_safely(file_bytes: bytes) -> pd.DataFrame:
     bio = BytesIO(file_bytes)
@@ -149,12 +149,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 def align_features_for_inference(
     df: pd.DataFrame, train_cols: List[str], target: Optional[str]
 ) -> pd.DataFrame:
-    """
-    Делает так, чтобы у инференса были те же фичи, что и при обучении:
-    - выкидывает target, если он есть в df
-    - создаёт отсутствующие колонки с NaN
-    - упорядочивает колонки как в train_cols (без target)
-    """
+    """Выравниваем фичи инференса под тренировочные фичи."""
     df = df.copy()
     feat_cols = [c for c in train_cols if (target is None or c != target)]
     if target and target in df.columns:
@@ -165,11 +160,14 @@ def align_features_for_inference(
     return df[feat_cols]
 
 
+# ---------------------------
+# Сбор контекста для LLM
+# ---------------------------
 def build_llm_context(run: Dict[str, Any]) -> str:
     """
     Собираем текстовый контекст по одному run для LLM:
     задача, здоровье датасета, метрики, важные фичи, проблемы,
-    рекомендации и план экспериментов.
+    рекомендации, next actions и план экспериментов.
     """
     parts: list[str] = []
 
@@ -212,11 +210,7 @@ def build_llm_context(run: Dict[str, Any]) -> str:
     if target_summary and (target_summary.get("target") or target_summary.get("has_target")):
         parts.append("=== Таргет ===")
         parts.append(f"Имя таргета: {target_summary.get('target')}")
-        parts.append(
-            f"Строк: {target_summary.get('n_rows')}, "
-            f"пропусков: {target_summary.get('n_missing')} "
-            f"(доля={target_summary.get('missing_frac')})"
-        )
+        parts.append(f"Строк: {target_summary.get('n_rows')}, пропусков: {target_summary.get('n_missing')}")
         if target_summary.get("task") == "classification":
             parts.append(f"Число классов: {target_summary.get('n_classes')}")
             top_classes = target_summary.get("top_classes") or []
@@ -279,49 +273,86 @@ def build_llm_context(run: Dict[str, Any]) -> str:
             parts.append(f"- {r}")
         parts.append("")
 
-    # Next actions
+    # Следующие шаги
     if next_actions:
-        parts.append("=== Следующие шаги ===")
+        parts.append("=== Следующие шаги (кратко) ===")
         for a in next_actions[:6]:
             parts.append(f"- {a}")
         parts.append("")
 
     # План экспериментов
     if experiment_plan:
-        parts.append("=== План экспериментов (mid+ DS) ===")
+        parts.append("=== План экспериментов (now / next / later) ===")
         for step in experiment_plan[:10]:
-            prio = step.get("priority")
-            title = step.get("title")
-            descr = step.get("description")
-            parts.append(f"- [{prio}] {title}: {descr}")
+            parts.append(
+                f"- [{step.get('priority')}] "
+                f"{step.get('title')}: {step.get('description')}"
+            )
         parts.append("")
 
     return "\n".join(parts)
 
 
+# ---------------------------
+# LLM: реальный вызов + fallback
+# ---------------------------
 def call_llm(prompt: str) -> str:
     """
-    Заглушка для LLM.
-    ⚠️ Сейчас НИЧЕГО не вызывает извне, просто форматирует ответ.
-    Потом сюда можно подставить:
-      - твой create-llm чат-сервис,
-      - или OpenAI / HuggingFace.
+    Вызов LLM через OpenAI, с безопасным fallback, если:
+    - нет OPENAI_API_KEY,
+    - библиотека не установлена,
+    - произошла ошибка при запросе.
     """
-    # Попробуем аккуратно вытащить только вопрос пользователя
-    marker = "=== Вопрос пользователя ==="
-    if marker in prompt:
-        user_question = prompt.split(marker, 1)[1].strip()
-    else:
-        user_question = prompt.strip()
+    def _fallback(reason: str) -> str:
+        question_marker = "=== Вопрос пользователя ==="
+        if question_marker in prompt:
+            user_question = prompt.split(question_marker, 1)[1].strip()
+        else:
+            user_question = prompt.strip()
 
-    return (
-        "⚠️ LLM ещё не подключён (stub).\n\n"
-        "Как DS-ассистент я вижу это так:\n\n"
-        f"Вопрос: {user_question}\n\n"
-        "• У тебя уже есть EDA, бейзлайн-модель, проблемы, рекомендации и план экспериментов.\n"
-        "• Последовательно закрывай шаги из блоков 'Следующие шаги' и 'План экспериментов (mid+ DS)'.\n"
-        "• Когда подключим реальную LLM, здесь будет детальный, адаптивный ответ с кодом и примерами."
-    )
+        return (
+            f"⚠️ LLM пока не подключён или недоступен ({reason}).\n\n"
+            "Но вот как я бы интерпретировал ситуацию как DS-ассистент:\n\n"
+            f"Вопрос: {user_question}\n\n"
+            "• У тебя уже есть EDA, бейзлайн-модель, список проблем и план экспериментов.\n"
+            "• Следующий шаг — последовательно закрывать пункты из блоков "
+            "«Что сделать дальше», «Следующие шаги» и из секции now/next в плане экспериментов.\n"
+        )
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    model_name = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+
+    if not api_key:
+        return _fallback("нет переменной окружения OPENAI_API_KEY")
+
+    try:
+        from openai import OpenAI  # type: ignore
+    except Exception:
+        return _fallback("библиотека openai не установлена (pip install -U openai)")
+
+    try:
+        client = OpenAI(api_key=api_key)
+        resp = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты опытный Data Science ассистент уровня strong middle/senior. "
+                        "Отвечай по-делу, структурировано, без воды. "
+                        "Давай конкретные шаги по работе с данными, фичами, моделями и метриками."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        content = resp.choices[0].message.content
+        if not content:
+            return _fallback("пустой ответ от модели")
+        return content
+    except Exception as e:
+        return _fallback(f"ошибка вызова API: {e}")
 
 
 # ---------------------------
@@ -352,7 +383,7 @@ async def upload_dataset(
         df = read_any_table(contents, file.filename)
         df = normalize_columns(df)
 
-        # 2) нормализуем target; пустую строку считаем отсутствующим target
+        # 2) нормализуем target; пустую строку считаем отсутствующим
         if target is not None:
             target = target.strip()
             if target == "":
@@ -383,16 +414,17 @@ async def upload_dataset(
         # 5.2) ранжированный список проблем (high/medium/low)
         problem_list = rank_problems(problems)
 
-        # 5.3) здоровость
+        # 5.3) здоровье датасета
         dataset_health = evaluate_dataset_health(eda, problems)
 
         # 5.4) идеи фич
         feature_suggestions = auto_feature_suggestions(df)
 
         # 6) модель
-        model_res = None
+        model_res: Optional[Dict[str, Any]] = None
         pipeline = None
         feature_importance: List[Dict[str, Any]] = []
+
         if task["task"] != "eda" and task.get("target"):
             model_res = train_baseline(
                 df,
@@ -408,21 +440,20 @@ async def upload_dataset(
                 except Exception:
                     feature_importance = []
 
-        # 6.1) код-подсказки (сигнатура build_code_hints(problems, task))
+        # 6.1) код-подсказки (совместимость со старыми сигнатурами)
         code_hints: List[Any] = []
         try:
-            code_hints = build_code_hints(problems, task)
+            code_hints = build_code_hints(task=task, problems=problems, model=model_res)  # type: ignore
+        except TypeError:
+            try:
+                code_hints = build_code_hints(task, problems)  # type: ignore
+            except TypeError:
+                try:
+                    code_hints = build_code_hints(problems, task)  # type: ignore
+                except Exception:
+                    code_hints = []
         except Exception:
             code_hints = []
-
-        # 6.2) план экспериментов (mid+ DS)
-        experiment_plan = build_experiment_plan(
-            task=task,
-            problems=problems,
-            dataset_health=dataset_health,
-            model=model_res,
-            column_roles=column_roles,
-        )
 
         # 7) отчёт
         report_text = build_report(df, eda, task, model_res, problems)
@@ -433,11 +464,20 @@ async def upload_dataset(
         # 9) рекомендации
         recs = build_recommendations(df, eda, task, problems, model_res)
 
-        # 10) статус
+        # 10) статус + next actions
         status = build_analysis_status(task, problems, model_res)
         next_actions = build_next_actions(task, problems, model_res)
 
-        # 11) сохраняем run
+        # 11) план экспериментов
+        experiment_plan = build_experiment_plan(
+            task=task,
+            problems=problems,
+            dataset_health=dataset_health,
+            model=model_res,
+            column_roles=column_roles,
+        )
+
+        # 12) сохраняем run
         run_id = f"run_{uuid4().hex[:8]}"
         RUNS[run_id] = {
             "run_id": run_id,
@@ -458,35 +498,33 @@ async def upload_dataset(
             "feature_suggestions": feature_suggestions,
             "feature_importance": feature_importance,
             "code_hints": code_hints,
-            "columns": list(df.columns),
             "experiment_plan": experiment_plan,
+            "columns": list(df.columns),
         }
         if pipeline is not None:
             PIPELINES[run_id] = pipeline
 
-        payload = {
-            key: RUNS[run_id][key]
-            for key in [
-                "run_id",
-                "filename",
-                "eda",
-                "task",
-                "problems",
-                "problem_list",
-                "target_summary",
-                "dataset_health",
-                "model",
-                "report",
-                "plots",
-                "recommendations",
-                "status",
-                "next_actions",
-                "feature_suggestions",
-                "feature_importance",
-                "code_hints",
-                "experiment_plan",
-            ]
-        }
+        payload_keys = [
+            "run_id",
+            "filename",
+            "eda",
+            "task",
+            "problems",
+            "problem_list",
+            "target_summary",
+            "dataset_health",
+            "model",
+            "report",
+            "plots",
+            "recommendations",
+            "status",
+            "next_actions",
+            "experiment_plan",
+            "feature_suggestions",
+            "feature_importance",
+            "code_hints",
+        ]
+        payload = {key: RUNS[run_id].get(key) for key in payload_keys}
         return JSONResponse(content=jsonable_encoder(payload))
 
     except ValueError as e:
@@ -515,12 +553,11 @@ async def upload_dataset(
 @app.post("/runs/{run_id}/predict")
 async def predict_on_run(
     run_id: str,
-    file: UploadFile = File(..., description="Файл с новыми объектами (может содержать target)"),
+    file: UploadFile = File(..., description="CSV/Excel/JSON/Parquet c новыми объектами (может содержать target)"),
     include_proba: bool = Form(default=True),
     return_rows: int = Form(default=30),
 ):
-    """
-    Прогоняет новый файл через pipeline выбранного run_id.
+    """Прогоняет новый файл через pipeline выбранного run_id.
     Если target в файле присутствует, вернём быстрые метрики по этому файлу.
     """
     if run_id not in RUNS:
@@ -558,7 +595,6 @@ async def predict_on_run(
         if include_proba and hasattr(pipe, "predict_proba"):
             try:
                 proba = pipe.predict_proba(X_inf)
-                # если многоклассовая классификация — вернём max prob
                 proba_list = np.max(proba, axis=1).tolist()
             except Exception:
                 proba_list = None
@@ -567,13 +603,7 @@ async def predict_on_run(
         metrics_out = None
         if y_true is not None:
             try:
-                from sklearn.metrics import (
-                    accuracy_score,
-                    f1_score,
-                    r2_score,
-                    mean_squared_error,
-                    mean_absolute_error,
-                )
+                from sklearn.metrics import accuracy_score, f1_score, r2_score, mean_squared_error, mean_absolute_error
 
                 if task_type == "classification":
                     acc = float(accuracy_score(y_true, y_pred))
@@ -649,7 +679,7 @@ def get_run_report(run_id: str):
 
 
 # ---------------------------
-# LLM-слой поверх агента
+# LLM-слой: /ask
 # ---------------------------
 @app.post("/ask")
 async def ask_agent(
@@ -658,9 +688,9 @@ async def ask_agent(
 ):
     """
     LLM-слой поверх DS-агента:
-    - по run_id вытаскиваем весь контекст (EDA, модель, проблемы, рекомендации, план),
+    - по run_id вытаскиваем весь контекст (EDA, модель, проблемы, рекомендации),
     - собираем текстовый контекст,
-    - формируем промпт и отправляем в call_llm (пока заглушка),
+    - формируем промпт и отправляем в call_llm,
     - возвращаем текстовый ответ.
     """
     if run_id not in RUNS:
@@ -670,14 +700,15 @@ async def ask_agent(
     context_text = build_llm_context(run)
 
     prompt = (
-        "Ты — опытный Data Science ассистент. "
-        "У тебя есть результаты анализа датасета, базовой модели, план экспериментов.\n\n"
+        "Ты — опытный Data Science ассистент уровня strong middle/senior.\n"
+        "У тебя есть результаты анализа датасета, бейзлайн-модель, список проблем, "
+        "оценка здоровья датасета и план экспериментов.\n\n"
         "=== Контекст анализа ===\n"
         f"{context_text}\n\n"
         "=== Вопрос пользователя ===\n"
         f"{question}\n\n"
-        "Ответь по-русски или на английском, структурировано, с конкретными шагами, "
-        "без лишней воды. Если уместно — предложи 2–3 следующих шага."
+        "Ответь по-русски или на английском (как удобнее), структурировано и по шагам. "
+        "Без лишней воды, дай 2–5 конкретных следующих шагов."
     )
 
     answer = call_llm(prompt)
@@ -690,7 +721,7 @@ async def ask_agent(
 
 
 # ---------------------------
-# Export отчёта в Markdown
+# Экспорт отчёта в Markdown
 # ---------------------------
 @app.get("/runs/{run_id}/download")
 def download_run_markdown(run_id: str):
@@ -698,7 +729,7 @@ def download_run_markdown(run_id: str):
         raise HTTPException(status_code=404, detail="run_id not found")
 
     data = RUNS[run_id]
-    lines: List[str] = []
+    lines = []
     lines.append(f"# Run {run_id}")
     if data.get("filename"):
         lines.append(f"**Файл:** {data['filename']}")
@@ -724,12 +755,6 @@ def download_run_markdown(run_id: str):
         lines.append("## Что сделать дальше")
         for r in data["recommendations"]:
             lines.append(f"- {r}")
-        lines.append("")
-
-    if data.get("experiment_plan"):
-        lines.append("## План экспериментов (mid+ DS)")
-        for step in data["experiment_plan"]:
-            lines.append(f"- [{step.get('priority')}] {step.get('title')}: {step.get('description')}")
         lines.append("")
 
     md = "\n".join(lines)
