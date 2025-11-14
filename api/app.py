@@ -378,6 +378,9 @@ async def upload_dataset(
         # 5.1) короткая сводка по таргету
         target_summary = summarize_target(df, task)
 
+        # 5.1.1) роли колонок (id / datetime / text / ...)
+        column_roles = detect_column_roles(df, task)
+
         # 5.2) ранжированный список проблем (high/medium/low)
         problem_list = rank_problems(problems)
 
@@ -445,6 +448,7 @@ async def upload_dataset(
             "problem_list": problem_list,
             "target_summary": target_summary,
             "dataset_health": dataset_health,
+            "column_roles": column_roles,
             "model": model_res,
             "report": report_text,
             "plots": plots,
