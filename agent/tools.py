@@ -508,6 +508,97 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
     return problems
 
 
+def detect_column_roles(df: pd.DataFrame, task: dict | None = None) -> dict:
+    """
+    Определяем "роль" каждой колонки:
+      id / datetime / bool / numeric / categorical / text
+    + флаг возможной утечки для числовых фич, сильно коррелирующих с таргетом.
+    Возвращаем dict[col_name] = {...}.
+    """
+    task = task or {}
+    target = task.get("target")
+    n_rows = len(df)
+
+    roles: dict[str, dict] = {}
+
+    for col in df.columns:
+        ser = df[col]
+        info: dict[str, object] = {
+            "role": None,
+            "n_unique": int(ser.nunique(dropna=True)),
+            "has_missing": bool(ser.isna().any()),
+        }
+
+        role: str | None = None
+        nunique = info["n_unique"]
+
+        # 1) id-подобные
+        if _looks_like_id(col) or (n_rows > 0 and nunique > 0.9 * n_rows):
+            role = "id"
+
+        # 2) datetime
+        if role is None:
+            if pd.api.types.is_datetime64_any_dtype(ser):
+                role = "datetime"
+            elif ser.dtype == "object":
+                if re.search(r"(date|time|timestamp)", col, re.IGNORECASE):
+                    try:
+                        parsed = pd.to_datetime(ser, errors="coerce")
+                        if parsed.notna().mean() > 0.7:
+                            role = "datetime"
+                    except Exception:
+                        pass
+
+        # 3) bool
+        if role is None:
+            if pd.api.types.is_bool_dtype(ser):
+                role = "bool"
+            else:
+                uniques = pd.Series(ser.dropna().unique())
+                if 0 < len(uniques) <= 2:
+                    role = "bool"
+
+        # 4) numeric / text / categorical
+        if role is None:
+            if pd.api.types.is_numeric_dtype(ser):
+                role = "numeric"
+            else:
+                # объектный столбец: текст или обычная категория
+                try:
+                    avg_len = float(
+                        ser.dropna().astype(str).str.len().mean() or 0.0
+                    )
+                except Exception:
+                    avg_len = 0.0
+
+                if avg_len > 50 and nunique > 30:
+                    role = "text"
+                else:
+                    role = "categorical"
+
+        info["role"] = role
+
+        # 5) возможная утечка (для числовых таргетов)
+        if target and target in df.columns and col != target:
+            tgt = df[target]
+            if pd.api.types.is_numeric_dtype(ser) and pd.api.types.is_numeric_dtype(tgt):
+                try:
+                    corr = float(tgt.corr(ser))
+                    if abs(corr) > 0.98:
+                        info["possible_leakage"] = True
+                        info["leakage_corr"] = corr
+                    else:
+                        info["possible_leakage"] = False
+                except Exception:
+                    pass
+
+        roles[col] = info
+
+    return roles
+
+
+
+
 # ---------------------------------------------------------------------
 # 6.1 оценка здоровья датасета
 # ---------------------------------------------------------------------

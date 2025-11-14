@@ -29,6 +29,7 @@ from agent.tools import (
     auto_feature_suggestions,
     extract_feature_importance,
     build_code_hints,
+    detect_column_roles,
 )
 
 # ---------------------------
@@ -347,7 +348,9 @@ async def upload_dataset(
         contents = await file.read()
 
         # 1) читаем и нормализуем
-        df = read_csv_safely(contents)
+        df = read_any_table(contents, file.filename)
+        df = normalize_columns(df)
+
         df = normalize_columns(df)
 
         # 2) нормализуем target; пустую строку считаем отсутствующим target
@@ -523,7 +526,9 @@ async def predict_on_run(
 
     try:
         contents = await file.read()
-        df_new = read_csv_safely(contents)
+        df_new = read_any_table(contents, file.filename)
+        df_new = normalize_columns(df_new)
+
         df_new = normalize_columns(df_new)
 
         task = RUNS[run_id]["task"]
