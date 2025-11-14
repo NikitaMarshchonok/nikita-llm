@@ -9,7 +9,7 @@ from io import BytesIO
 from typing import Optional, Literal
 
 import pandas as pd
-import numpy as np  # можно удалить, если не понадобится
+import numpy as np
 import re
 
 from sklearn.model_selection import train_test_split
@@ -85,7 +85,7 @@ def basic_eda(df: pd.DataFrame) -> dict:
 
 
 # ---------------------------------------------------------------------
-# 2. Угадывание таргета и задачи
+# 2. угадывание таргета и задачи
 # ---------------------------------------------------------------------
 ID_LIKE = {"id", "ID", "Id", "index", "Rk", "rank"}
 
@@ -99,7 +99,7 @@ def _guess_target(
 ) -> tuple[Literal["eda", "classification", "regression"], Optional[str]]:
     lower_cols = {c.lower(): c for c in df.columns}
 
-    # Явные названия
+    # явный target / label / class / y
     for cand in ("target", "label", "class", "y"):
         if cand in lower_cols:
             col = lower_cols[cand]
@@ -108,7 +108,7 @@ def _guess_target(
             else:
                 return "regression", col
 
-    # Классификация по "категориальному" виду
+    # "псевдо-таргет" по маленькому числу уникальных значений
     for c in df.columns:
         if _looks_like_id(c):
             continue
@@ -116,7 +116,7 @@ def _guess_target(
         if 2 <= uniq <= 30:
             return "classification", c
 
-    # Регрессия по числовому признаку
+    # fallback — числовой регрессионный таргет
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
     for c in num_cols:
         if _looks_like_id(c):
@@ -128,11 +128,6 @@ def _guess_target(
 
 
 def detect_task(df: pd.DataFrame, target: Optional[str] = None) -> dict:
-    """
-    Возвращает dict с полями:
-      task: "eda" | "classification" | "regression"
-      target: имя колонки или None
-    """
     if target is not None and target in df.columns:
         nunique = df[target].nunique()
         if df[target].dtype == "object" or nunique <= 30:
@@ -146,13 +141,13 @@ def detect_task(df: pd.DataFrame, target: Optional[str] = None) -> dict:
 
 
 # ---------------------------------------------------------------------
-# 3. Приведение строк к числам (пока не используется, но можно в будущем)
+# 3. приведение строк к числам и препроцессинг
 # ---------------------------------------------------------------------
 def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Пытаемся аккуратно превратить "числовые строки" вида
-    '1 234', '12,5' в числа. Пока не вызывается в пайплайне,
-    но оставляем как полезный инструмент.
+    Пытаемся конвертировать object-колонки в числа:
+    '1 234,5' → 1234.5
+    Сейчас не используется, но оставляем для будущих апдейтов.
     """
     new_df = df.copy()
     for col in new_df.columns:
@@ -168,9 +163,6 @@ def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return new_df
 
 
-# ---------------------------------------------------------------------
-# 4. Препроцессор
-# ---------------------------------------------------------------------
 def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
     numeric_features = X.select_dtypes(
         include=["int64", "float64", "int32", "float32"]
@@ -197,7 +189,7 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
 
 
 # ---------------------------------------------------------------------
-# 5. Обучение базовой модели
+# 4. обучение базовой модели
 # ---------------------------------------------------------------------
 def train_baseline(
     df: pd.DataFrame,
@@ -206,6 +198,11 @@ def train_baseline(
     problems: dict | None = None,
     return_model: bool = False,
 ) -> Optional[dict]:
+    """
+    Обучаем RandomForest (классификация/регрессия) с учётом:
+    - class_weight при дисбалансе
+    - дропа id-подобных и константных колонок
+    """
     try:
         if target not in df.columns:
             return {"model_type": "skipped", "reason": f"Колонка '{target}' не найдена."}
@@ -217,7 +214,7 @@ def train_baseline(
         if df.shape[0] < 20:
             return {"model_type": "skipped", "reason": "Мало строк после удаления NaN в таргете."}
 
-        # 1. собираем, что будем дропать (id + константы)
+        # 1. что дропаем (id + константы)
         drop_cols: list[str] = []
         for c in problems.get("id_like", []) or []:
             if c in df.columns and c != target:
@@ -226,7 +223,7 @@ def train_baseline(
             if c in df.columns and c != target and c not in drop_cols:
                 drop_cols.append(c)
 
-        # 2. формируем X, y
+        # 2. X, y
         X = df.drop(columns=[target] + drop_cols)
         y = df[target]
 
@@ -328,7 +325,7 @@ def train_baseline(
 
 
 # ---------------------------------------------------------------------
-# 6. Текстовый отчёт
+# 5. отчёт (текст для UI и markdown)
 # ---------------------------------------------------------------------
 def build_report(
     df: pd.DataFrame,
@@ -427,7 +424,7 @@ def build_report(
 
 
 # ---------------------------------------------------------------------
-# 7. Анализ проблем в датасете
+# 6. анализ проблем датасета
 # ---------------------------------------------------------------------
 def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
     problems: dict[str, object] = {}
@@ -494,7 +491,7 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
         if n_nan_target > 0:
             problems["target_has_nan"] = {"column": target, "nan_count": n_nan_target}
 
-    # дисбаланс КАК ОТДЕЛЬНЫЙ БЛОК (не вложенный!)
+    # дисбаланс классов
     if task.get("task") == "classification" and target and target in df.columns:
         vc = df[target].value_counts(dropna=False)
         if len(vc) >= 2:
@@ -524,7 +521,7 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
 
 
 # ---------------------------------------------------------------------
-# 8. Роли колонок
+# 6.0 роли колонок
 # ---------------------------------------------------------------------
 def detect_column_roles(df: pd.DataFrame, task: dict | None = None) -> dict:
     """
@@ -581,7 +578,6 @@ def detect_column_roles(df: pd.DataFrame, task: dict | None = None) -> dict:
             if pd.api.types.is_numeric_dtype(ser):
                 role = "numeric"
             else:
-                # объектный столбец: текст или обычная категория
                 try:
                     avg_len = float(
                         ser.dropna().astype(str).str.len().mean() or 0.0
@@ -616,7 +612,7 @@ def detect_column_roles(df: pd.DataFrame, task: dict | None = None) -> dict:
 
 
 # ---------------------------------------------------------------------
-# 9. Оценка "здоровья" датасета
+# 6.1 оценка здоровья датасета
 # ---------------------------------------------------------------------
 def evaluate_dataset_health(eda: dict, problems: dict) -> dict:
     score = 100
@@ -659,7 +655,7 @@ def evaluate_dataset_health(eda: dict, problems: dict) -> dict:
 
 
 # ---------------------------------------------------------------------
-# 10. План экспериментов (как сделал бы mid+ DS)
+# 6.2 план экспериментов как у mid+ DS
 # ---------------------------------------------------------------------
 def build_experiment_plan(
     task: dict | None,
@@ -693,7 +689,8 @@ def build_experiment_plan(
             "tags": tags or [],
         })
 
-    # --- NOW: починить критичные проблемы с данными ---
+    # --- NOW: критичные проблемы с данными ---
+
     if problems.get("target_has_nan"):
         info = problems["target_has_nan"]
         add(
@@ -736,7 +733,7 @@ def build_experiment_plan(
             ["data", "leakage"],
         )
 
-    # --- NEXT: улучшение фич и моделей ---
+    # --- NEXT: фичи и модели ---
 
     # high cardinality → CatBoost / target encoding
     if problems.get("high_cardinality"):
@@ -772,7 +769,7 @@ def build_experiment_plan(
             "next",
             "Обработать текстовые признаки",
             "Для текстовых колонок попробуй TF-IDF + линейную модель или text-эмбеддинги. "
-            "Сейчас они, вероятно, игнорируются/кодируются грубо.",
+            "Сейчас они, вероятно, игнорируются или кодируются грубо.",
             ["features", "text"],
         )
 
@@ -787,6 +784,7 @@ def build_experiment_plan(
         )
 
     # --- LATER: метрики и продакшен ---
+
     if task.get("task") == "classification":
         add(
             "later",
@@ -813,7 +811,7 @@ def build_experiment_plan(
 
 
 # ---------------------------------------------------------------------
-# 11. Текстовые рекомендации по датасету
+# 7. текстовые рекомендации
 # ---------------------------------------------------------------------
 def build_recommendations(
     df: pd.DataFrame,
@@ -862,7 +860,7 @@ def build_recommendations(
                 + " — заполни/удали/сделай отдельный флаг."
             )
 
-    # дисбаланс — ВНЕ зависимости от target_has_nan
+    # дисбаланс
     if problems.get("class_imbalance"):
         ci = problems["class_imbalance"]
         recs.append(
@@ -905,7 +903,7 @@ def build_recommendations(
 
 
 # ---------------------------------------------------------------------
-# 12. Графики → base64
+# 8. графики → base64
 # ---------------------------------------------------------------------
 def make_plots_base64(df: pd.DataFrame) -> list[dict]:
     plots: list[dict] = []
@@ -944,7 +942,7 @@ def make_plots_base64(df: pd.DataFrame) -> list[dict]:
 
 
 # ---------------------------------------------------------------------
-# 13. Сохранение запуска на диск
+# 9. сохранение run на диск (опционально)
 # ---------------------------------------------------------------------
 def save_run(run_data: dict, model_pipeline) -> str:
     run_id = str(uuid.uuid4())
@@ -961,7 +959,7 @@ def save_run(run_data: dict, model_pipeline) -> str:
 
 
 # ---------------------------------------------------------------------
-# 14. Краткий статус и next actions
+# 10. Краткий статус и next actions
 # ---------------------------------------------------------------------
 def build_analysis_status(task: dict, problems: dict, model: dict | None) -> dict:
     problems = problems or {}
@@ -986,7 +984,6 @@ def build_analysis_status(task: dict, problems: dict, model: dict | None) -> dic
         status["dataset"] = "warning"
         status["notes"].append("Есть признаки с >30% пропусков")
 
-    # поддерживаем и старые, и новые имена полей дисбаланса
     ci = problems.get("class_imbalance")
     if ci:
         max_cls = ci.get("max_class") or ci.get("most_common_class") or "?"
@@ -1040,16 +1037,15 @@ def build_next_actions(task: dict, problems: dict, model: dict | None) -> list[s
 
 
 # ---------------------------------------------------------------------
-# 15. Сводка по таргету
+# 11. Расширенная сводка по таргету (для LLM и UI)
 # ---------------------------------------------------------------------
 def summarize_target(df: pd.DataFrame, task: dict) -> dict:
     """
     Возвращает json-friendly сводку по таргету:
-    - что за колонка
-    - сколько пропусков
-    - для классификации: топ-классы
+    - есть ли таргет
+    - сколько пропусков / строк
+    - для классификации: число классов + топ классы
     - для регрессии: min/max/mean/std
-    Всё без NaN, чтобы FastAPI не ругался.
     """
     target = (task or {}).get("target")
     task_type = (task or {}).get("task", "eda")
@@ -1078,13 +1074,9 @@ def summarize_target(df: pd.DataFrame, task: dict) -> dict:
         vc = col.value_counts(dropna=False)
         n_classes = int(len(vc))
 
-        # делаем json-friendly список
         top_classes = []
-        for cls, cnt in vc.head(20).items():   # режем, чтобы не тащить 1000 классов
-            if pd.isna(cls):
-                label = "__NaN__"
-            else:
-                label = str(cls)
+        for cls, cnt in vc.head(20).items():
+            label = "__NaN__" if pd.isna(cls) else str(cls)
             top_classes.append({
                 "label": label,
                 "count": int(cnt),
@@ -1106,7 +1098,6 @@ def summarize_target(df: pd.DataFrame, task: dict) -> dict:
             "std": float(col.std(skipna=True)) if col.notna().any() else 0.0,
         })
     else:
-        # если таргет не numeric, но задача регрессии — всё равно что-то вернём
         base.update({
             "note": "target_is_not_numeric",
         })
@@ -1115,7 +1106,7 @@ def summarize_target(df: pd.DataFrame, task: dict) -> dict:
 
 
 # ---------------------------------------------------------------------
-# 16. Ранжирование проблем по важности
+# 12. Ранжирование проблем по важности (для UI и LLM)
 # ---------------------------------------------------------------------
 def rank_problems(problems: dict) -> list[dict]:
     """
@@ -1182,7 +1173,7 @@ def rank_problems(problems: dict) -> list[dict]:
             "key": "high_corr_pairs",
             "severity": "low",
             "message": "Есть сильно коррелирующие признаки — можно отфильтровать.",
-            "data": problems["high_corr_pairs"][:20],  # не тащим всё
+            "data": problems["high_corr_pairs"][:20],
         })
 
     # 7. высокая кардинальность
@@ -1194,12 +1185,11 @@ def rank_problems(problems: dict) -> list[dict]:
             "data": problems["high_cardinality"],
         })
 
-    # если ничего не нашли — вернём пустой список
     return ranked
 
 
 # ---------------------------------------------------------------------
-# 17. Авто-подсказки по фичам
+# 13. Идеи новых фич
 # ---------------------------------------------------------------------
 def auto_feature_suggestions(df: pd.DataFrame) -> list[str]:
     """
@@ -1243,7 +1233,7 @@ def auto_feature_suggestions(df: pd.DataFrame) -> list[str]:
 
 
 # ---------------------------------------------------------------------
-# 18. Важность фич
+# 14. Feature importance из pipeline
 # ---------------------------------------------------------------------
 def extract_feature_importance(pipeline) -> list[dict]:
     """
@@ -1252,7 +1242,6 @@ def extract_feature_importance(pipeline) -> list[dict]:
     Если достать нельзя — возвращаем пустой список.
     """
     try:
-        # у нас в pipeline шаги: ("preprocess", ...), ("model", RandomForest...)
         model = pipeline.named_steps.get("model")
         preprocess = pipeline.named_steps.get("preprocess")
 
@@ -1261,29 +1250,24 @@ def extract_feature_importance(pipeline) -> list[dict]:
 
         importances = model.feature_importances_
 
-        # нужно восстановить имена фич после ColumnTransformer + OneHotEncoder
         feature_names: list[str] = []
         if hasattr(preprocess, "get_feature_names_out"):
             feature_names = list(preprocess.get_feature_names_out())
         else:
-            # fallback — просто пронумеруем
             feature_names = [f"feature_{i}" for i in range(len(importances))]
 
         items = []
         for name, imp in zip(feature_names, importances):
             items.append({"feature": str(name), "importance": float(imp)})
 
-        # отсортируем по важности
         items.sort(key=lambda x: x["importance"], reverse=True)
-
-        # можно сразу ограничить топ-50
         return items[:50]
     except Exception:
         return []
 
 
 # ---------------------------------------------------------------------
-# 19. Код-подсказки (snippets) под типичные проблемы
+# 15. Код-подсказки (snippets) под найденные проблемы
 # ---------------------------------------------------------------------
 def build_code_hints(problems: dict, task: dict) -> list[dict]:
     """
