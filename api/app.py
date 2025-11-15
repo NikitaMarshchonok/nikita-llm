@@ -31,6 +31,7 @@ from agent.tools import (
     build_code_hints,
     detect_column_roles,
     build_experiment_plan,
+    auto_model_search,
 )
 
 # ---------------------------
@@ -420,35 +421,51 @@ async def upload_dataset(
         # 5.4) идеи фич
         feature_suggestions = auto_feature_suggestions(df)
 
-
-        # 6) модель
+        # 6) авто-поиск лучшей модели
         model_res: Optional[Dict[str, Any]] = None
         pipeline = None
+        model_leaderboard: Optional[list] = None
         feature_importance: List[Dict[str, Any]] = []
 
         if task["task"] != "eda" and task.get("target"):
-            model_res = train_baseline(
-                df,
-                task["target"],
-                task["task"],
-                problems=problems,
-                return_model=True,
-            )
-            if model_res and "pipeline" in model_res:
-                pipeline = model_res.pop("pipeline")
-                try:
-                    feature_importance = extract_feature_importance(pipeline)
-                except Exception:
-                    feature_importance = []
+            try:
+                auto_res = auto_model_search(df, task, problems)
+            except Exception:
+                auto_res = None
 
-        # 6.1) код-подсказки
-        code_hints: List[Any] = []
+            if auto_res is not None:
+                model_res = auto_res.get("best_model")
+                pipeline = auto_res.get("pipeline")
+                model_leaderboard = auto_res.get("leaderboard")
+
+            # fallback: если всё упало — старый train_baseline
+            if model_res is None or model_res.get("model_type") == "skipped":
+                baseline = train_baseline(
+                    df,
+                    task["target"],
+                    task["task"],
+                    problems=problems,
+                    return_model=True,
+                )
+                if baseline:
+                    if "pipeline" in baseline:
+                        pipeline = baseline.pop("pipeline")
+                    model_res = baseline
+
+        # 6.1) feature importance, если смогли обучить pipeline
+        if pipeline is not None:
+            try:
+                feature_importance = extract_feature_importance(pipeline)
+            except Exception:
+                feature_importance = []
+
+        # 6.2) код-подсказки под проблемы
         try:
             code_hints = build_code_hints(problems, task)
         except Exception:
             code_hints = []
 
-        # 7) отчёт
+        # 7) текстовый отчёт
         report_text = build_report(df, eda, task, model_res, problems)
 
         # 8) графики
@@ -457,11 +474,11 @@ async def upload_dataset(
         # 9) рекомендации
         recs = build_recommendations(df, eda, task, problems, model_res)
 
-         # 10) статус + next actions
+        # 10) статус + next actions
         status = build_analysis_status(task, problems, model_res)
         next_actions = build_next_actions(task, problems, model_res)
 
-        # 11) план экспериментов
+        # 11) план экспериментов (now/next/later)
         experiment_plan = build_experiment_plan(
             task=task,
             problems=problems,
@@ -483,6 +500,7 @@ async def upload_dataset(
             "dataset_health": dataset_health,
             "column_roles": column_roles,
             "model": model_res,
+            "model_leaderboard": model_leaderboard,
             "report": report_text,
             "plots": plots,
             "recommendations": recs,
@@ -507,6 +525,7 @@ async def upload_dataset(
             "target_summary",
             "dataset_health",
             "model",
+            "model_leaderboard",
             "report",
             "plots",
             "recommendations",
@@ -538,6 +557,7 @@ async def upload_dataset(
                 "hint": "проверь файл и target",
             },
         )
+
 
 
 # ---------------------------

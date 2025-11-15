@@ -18,12 +18,17 @@ from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
+
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
     mean_squared_error,
     roc_auc_score,
+    average_precision_score,
 )
+
 import joblib
 
 import matplotlib
@@ -322,6 +327,254 @@ def train_baseline(
 
     except Exception as e:
         return {"model_type": "skipped", "reason": f"Ошибка обучения: {e}"}
+
+
+# ---------------------------------------------------------------------
+# 4.1. Поиск лучшей модели (auto-modeling)
+# ---------------------------------------------------------------------
+def auto_model_search(
+    df: pd.DataFrame,
+    task: dict,
+    problems: dict | None = None,
+    return_pipeline: bool = True,
+) -> Optional[dict]:
+    """
+    Перебираем несколько моделей (как сделал бы мидл-DS),
+    считаем метрики и выбираем лучшую.
+
+    Возвращаем словарь:
+    {
+      "best_model": {...},        # метрики лучшей модели
+      "leaderboard": [...],       # список моделей с метриками
+      "pipeline": best_pipeline   # sklearn Pipeline или None
+    }
+    """
+    problems = problems or {}
+    task_type = task.get("task")
+    target = task.get("target")
+
+    if task_type == "eda" or not target or target not in df.columns:
+        return None
+
+    # 0. убираем строки с NaN в таргете
+    df_clean = df[~df[target].isna()].copy()
+    if df_clean.shape[0] < 50:
+        return {
+            "best_model": {
+                "model_type": "skipped",
+                "reason": "Мало строк после удаления NaN в таргете (<50).",
+            },
+            "leaderboard": [],
+            "pipeline": None,
+        }
+
+    # 1. дропаем id-подобные и константы
+    drop_cols: list[str] = []
+    for c in problems.get("id_like", []) or []:
+        if c in df_clean.columns and c != target:
+            drop_cols.append(c)
+    for c in problems.get("constant_features", []) or []:
+        if c in df_clean.columns and c != target and c not in drop_cols:
+            drop_cols.append(c)
+
+    X = df_clean.drop(columns=[target] + drop_cols)
+    y = df_clean[target]
+
+    if X.shape[1] == 0:
+        return {
+            "best_model": {
+                "model_type": "skipped",
+                "reason": "После очистки не осталось признаков.",
+            },
+            "leaderboard": [],
+            "pipeline": None,
+        }
+
+    preprocessor = build_preprocessor(X)
+
+    # 2. train/val split
+    if task_type == "classification":
+        counts = y.value_counts(dropna=False)
+        can_stratify = (counts >= 2).all()
+        X_train, X_val, y_train, y_val = train_test_split(
+            X,
+            y,
+            test_size=0.2,
+            random_state=42,
+            stratify=y if can_stratify else None,
+        )
+    else:
+        can_stratify = False
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+
+    # 3. список кандидатов как у мидла
+    models_cfg: list[dict] = []
+
+    if task_type == "classification":
+        class_weight = "balanced" if problems.get("class_imbalance") else None
+
+        # Логистическая регрессия
+        models_cfg.append(
+            {
+                "name": "LogisticRegression",
+                "estimator": LogisticRegression(
+                    max_iter=1000,
+                    n_jobs=-1,
+                ),
+            }
+        )
+
+        # RandomForest
+        rf_params = dict(n_estimators=200, random_state=42, n_jobs=-1)
+        if class_weight is not None:
+            rf_params["class_weight"] = class_weight
+        models_cfg.append(
+            {
+                "name": "RandomForestClassifier",
+                "estimator": RandomForestClassifier(**rf_params),
+            }
+        )
+
+        # Gradient Boosting
+        models_cfg.append(
+            {
+                "name": "GradientBoostingClassifier",
+                "estimator": GradientBoostingClassifier(),
+            }
+        )
+
+    elif task_type == "regression":
+        models_cfg.extend(
+            [
+                {
+                    "name": "LinearRegression",
+                    "estimator": LinearRegression(),
+                },
+                {
+                    "name": "RandomForestRegressor",
+                    "estimator": RandomForestRegressor(
+                        n_estimators=200, random_state=42, n_jobs=-1
+                    ),
+                },
+                {
+                    "name": "GradientBoostingRegressor",
+                    "estimator": GradientBoostingRegressor(),
+                },
+            ]
+        )
+    else:
+        return {
+            "best_model": {
+                "model_type": "skipped",
+                "reason": f"Неизвестный тип задачи: {task_type}",
+            },
+            "leaderboard": [],
+            "pipeline": None,
+        }
+
+    leaderboard: list[dict] = []
+    best_score: Optional[float] = None
+    best_entry: Optional[dict] = None
+    best_pipeline = None
+
+    for cfg in models_cfg:
+        est = cfg["estimator"]
+        name = cfg["name"]
+
+        pipe = Pipeline(
+            steps=[
+                ("preprocess", preprocessor),
+                ("model", est),
+            ]
+        )
+
+        try:
+            pipe.fit(X_train, y_train)
+        except Exception as e:
+            leaderboard.append(
+                {
+                    "name": name,
+                    "model_type": est.__class__.__name__,
+                    "status": "failed",
+                    "error": str(e),
+                }
+            )
+            continue
+
+        metrics: dict = {
+            "name": name,
+            "model_type": est.__class__.__name__,
+        }
+
+        if task_type == "classification":
+            y_pred = pipe.predict(X_val)
+            acc = float(accuracy_score(y_val, y_pred))
+            f1w = float(f1_score(y_val, y_pred, average="weighted"))
+
+            metrics["accuracy"] = acc
+            metrics["f1"] = f1w
+
+            # ROC-AUC и PR-AUC для бинарки
+            if y_val.nunique() == 2 and hasattr(pipe, "predict_proba"):
+                try:
+                    proba = pipe.predict_proba(X_val)[:, 1]
+                    roc = float(roc_auc_score(y_val, proba))
+                    pr = float(average_precision_score(y_val, proba))
+                    metrics["roc_auc"] = roc
+                    metrics["pr_auc"] = pr
+                except Exception:
+                    pass
+
+            primary_score = f1w
+
+        else:  # regression
+            y_pred = pipe.predict(X_val)
+            mse = float(mean_squared_error(y_val, y_pred))
+            rmse = mse ** 0.5
+            metrics["rmse"] = rmse
+            primary_score = -rmse  # меньше rmse -> лучше, поэтому минус
+
+        metrics["primary_score"] = primary_score
+        leaderboard.append(metrics)
+
+        if (best_score is None) or (primary_score > best_score):
+            best_score = primary_score
+            best_entry = metrics
+            best_pipeline = pipe
+
+    # сортируем лидерборд
+    leaderboard_sorted = sorted(
+        leaderboard, key=lambda x: x.get("primary_score", float("-inf")), reverse=True
+    )
+
+    if best_entry is None:
+        return {
+            "best_model": {
+                "model_type": "skipped",
+                "reason": "Все кандидаты упали на обучении.",
+            },
+            "leaderboard": leaderboard_sorted,
+            "pipeline": None,
+        }
+
+    # добавим тренировочный лог
+    best_model = dict(best_entry)
+    best_model["training_log"] = {
+        "dropped_columns": drop_cols,
+        "stratified_split": bool(can_stratify),
+        "used_class_weight": bool(
+            task_type == "classification" and problems.get("class_imbalance")
+        ),
+    }
+
+    return {
+        "best_model": best_model,
+        "leaderboard": leaderboard_sorted,
+        "pipeline": best_pipeline if return_pipeline else None,
+    }
+
 
 
 # ---------------------------------------------------------------------
