@@ -340,14 +340,12 @@ def auto_model_search(
 ) -> Optional[dict]:
     """
     Перебираем несколько моделей (как сделал бы мидл-DS),
-    считаем метрики с k-fold CV и выбираем лучшую.
+    считаем метрики и выбираем лучшую.
 
-    Возвращаем словарь:
-    {
-      "best_model": {...},        # метрики лучшей модели
-      "leaderboard": [...],       # список моделей с метриками
-      "pipeline": best_pipeline   # sklearn Pipeline или None
-    }
+    Теперь:
+    - есть holdout-метрики (train/val сплит)
+    - есть k-fold cross-validation (3 фолда)
+    - primary_score = средний CV-score (f1_weighted для классификации, RMSE для регрессии)
     """
     problems = problems or {}
     task_type = task.get("task")
@@ -392,37 +390,37 @@ def auto_model_search(
 
     preprocessor = build_preprocessor(X)
 
-    # 2. CV-стратегия и метрики
+    # 2. holdout + CV-стратегия
     if task_type == "classification":
         counts = y.value_counts(dropna=False)
         can_stratify = (counts >= 2).all()
-        if can_stratify:
-            cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-        else:
-            cv = KFold(n_splits=5, shuffle=True, random_state=42)
 
-        n_classes = int(y.nunique())
-        scoring = {
-            "accuracy": "accuracy",
-            "f1": "f1_weighted",
-        }
-        if n_classes == 2:
-            scoring["roc_auc"] = "roc_auc"
-            scoring["pr_auc"] = "average_precision"
+        # holdout-сплит
+        X_train, X_val, y_train, y_val = train_test_split(
+            X,
+            y,
+            test_size=0.2,
+            random_state=42,
+            stratify=y if can_stratify else None,
+        )
+
+        # CV-объект
+        if can_stratify:
+            cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+        else:
+            cv = KFold(n_splits=3, shuffle=True, random_state=42)
     else:
         can_stratify = False
-        cv = KFold(n_splits=5, shuffle=True, random_state=42)
-        scoring = {
-            "rmse": "neg_root_mean_squared_error",
-        }
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+        cv = KFold(n_splits=3, shuffle=True, random_state=42)
 
     # 3. список кандидатов
     models_cfg: list[dict] = []
 
     if task_type == "classification":
-        # если есть дисбаланс — используем class_weight='balanced'
-        use_balanced = bool(problems.get("class_imbalance"))
-        cw = "balanced" if use_balanced else None
+        class_weight = "balanced" if problems.get("class_imbalance") else None
 
         models_cfg.append(
             {
@@ -430,14 +428,15 @@ def auto_model_search(
                 "estimator": LogisticRegression(
                     max_iter=2000,
                     n_jobs=-1,
-                    class_weight=cw,
+                    # class_weight может быть None или 'balanced'
+                    class_weight=class_weight,
                 ),
             }
         )
 
-        rf_params = dict(n_estimators=200, random_state=42, n_jobs=-1)
-        if cw is not None:
-            rf_params["class_weight"] = cw
+        rf_params = dict(n_estimATORS=200, random_state=42, n_jobs=-1)
+        if class_weight is not None:
+            rf_params["class_weight"] = class_weight
         models_cfg.append(
             {
                 "name": "RandomForestClassifier",
@@ -484,7 +483,7 @@ def auto_model_search(
     leaderboard: list[dict] = []
     best_score: Optional[float] = None
     best_entry: Optional[dict] = None
-    best_cfg: Optional[dict] = None
+    best_pipeline = None
 
     for cfg in models_cfg:
         est = cfg["estimator"]
@@ -498,15 +497,8 @@ def auto_model_search(
         )
 
         try:
-            cv_res = cross_validate(
-                pipe,
-                X,
-                y,
-                cv=cv,
-                scoring=scoring,
-                n_jobs=-1,
-                return_train_score=False,
-            )
+            # 1) holdout-метрики
+            pipe.fit(X_train, y_train)
         except Exception as e:
             leaderboard.append(
                 {
@@ -521,44 +513,92 @@ def auto_model_search(
         metrics: dict = {
             "name": name,
             "model_type": est.__class__.__name__,
+            "status": "ok",
         }
 
-        # усредняем метрики по фолдам
-        for key in scoring.keys():
-            test_key = f"test_{key}"
-            if test_key not in cv_res:
-                continue
-            vals = np.asarray(cv_res[test_key], dtype=float)
-            if key == "rmse":
-                # neg_root_mean_squared_error -> делаем положительный RMSE
-                metrics[key] = float(-vals.mean())
-            else:
-                metrics[key] = float(vals.mean())
-
-        # основной скор для выбора лучшей модели
+        # --- holdout ---
         if task_type == "classification":
-            primary = metrics.get("f1")
-            if primary is None:
-                primary = metrics.get("accuracy", float("-inf"))
-        else:
-            rmse = metrics.get("rmse")
-            primary = -rmse if rmse is not None else float("-inf")
+            y_pred = pipe.predict(X_val)
+            acc = float(accuracy_score(y_val, y_pred))
+            f1w = float(f1_score(y_val, y_pred, average="weighted"))
 
-        metrics["primary_score"] = primary
+            metrics["val_accuracy"] = acc
+            metrics["val_f1"] = f1w
+
+            # для бинарки считаем ROC-AUC и PR-AUC
+            if y_val.nunique() == 2 and hasattr(pipe, "predict_proba"):
+                try:
+                    proba = pipe.predict_proba(X_val)[:, 1]
+                    roc = float(roc_auc_score(y_val, proba))
+                    pr = float(average_precision_score(y_val, proba))
+                    metrics["val_roc_auc"] = roc
+                    metrics["val_pr_auc"] = pr
+                except Exception:
+                    pass
+
+            primary_score = f1w
+
+        else:  # regression
+            y_pred = pipe.predict(X_val)
+            mse = float(mean_squared_error(y_val, y_pred))
+            rmse = mse ** 0.5
+            metrics["val_rmse"] = rmse
+            primary_score = -rmse  # меньше rmse → лучше
+
+        # --- cross-validation ---
+        try:
+            if task_type == "classification":
+                cv_res = cross_validate(
+                    pipe,
+                    X,
+                    y,
+                    cv=cv,
+                    scoring={
+                        "f1_weighted": "f1_weighted",
+                        "accuracy": "accuracy",
+                    },
+                    n_jobs=-1,
+                )
+                cv_f1 = cv_res["test_f1_weighted"]
+                cv_acc = cv_res["test_accuracy"]
+                metrics["cv_f1_mean"] = float(cv_f1.mean())
+                metrics["cv_f1_std"] = float(cv_f1.std())
+                metrics["cv_accuracy_mean"] = float(cv_acc.mean())
+                metrics["cv_accuracy_std"] = float(cv_acc.std())
+
+                primary_score = metrics["cv_f1_mean"]
+            else:
+                cv_res = cross_validate(
+                    pipe,
+                    X,
+                    y,
+                    cv=cv,
+                    scoring={"mse": "neg_mean_squared_error"},
+                    n_jobs=-1,
+                )
+                cv_mse = -cv_res["test_mse"]
+                cv_rmse = np.sqrt(cv_mse)
+                metrics["cv_rmse_mean"] = float(cv_rmse.mean())
+                metrics["cv_rmse_std"] = float(cv_rmse.std())
+
+                primary_score = -metrics["cv_rmse_mean"]
+        except Exception:
+            # если CV упал, остаёмся только с holdout-метриками
+            pass
+
+        metrics["primary_score"] = primary_score
         leaderboard.append(metrics)
 
-        if (best_score is None) or (primary > best_score):
-            best_score = primary
+        if (best_score is None) or (primary_score > best_score):
+            best_score = primary_score
             best_entry = metrics
-            best_cfg = cfg
+            best_pipeline = pipe
 
     leaderboard_sorted = sorted(
-        leaderboard,
-        key=lambda x: x.get("primary_score", float("-inf")),
-        reverse=True,
+        leaderboard, key=lambda x: x.get("primary_score", float("-inf")), reverse=True
     )
 
-    if best_entry is None or best_cfg is None:
+    if best_entry is None:
         return {
             "best_model": {
                 "model_type": "skipped",
@@ -568,31 +608,22 @@ def auto_model_search(
             "pipeline": None,
         }
 
-    # финальная модель: обучаем лучшую на всех данных
-    best_est = best_cfg["estimator"]
-    best_pipeline = Pipeline(
-        steps=[
-            ("preprocess", build_preprocessor(X)),  # новый препроцессор на всём X
-            ("model", best_est),
-        ]
-    )
-    best_pipeline.fit(X, y)
-
     best_model = dict(best_entry)
-    best_model["model_type"] = best_entry.get("model_type")
     best_model["training_log"] = {
         "dropped_columns": drop_cols,
-        "stratified_split": bool(task_type == "classification" and can_stratify),
+        "stratified_split": bool(can_stratify),
         "used_class_weight": bool(
             task_type == "classification" and problems.get("class_imbalance")
         ),
-        "cv_folds": cv.get_n_splits(),
     }
+
+    if not return_pipeline:
+        best_pipeline = None
 
     return {
         "best_model": best_model,
         "leaderboard": leaderboard_sorted,
-        "pipeline": best_pipeline if return_pipeline else None,
+        "pipeline": best_pipeline,
     }
 
 
