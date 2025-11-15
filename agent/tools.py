@@ -12,7 +12,7 @@ import pandas as pd
 import numpy as np
 import re
 
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold, KFold, cross_validate
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
@@ -340,7 +340,7 @@ def auto_model_search(
 ) -> Optional[dict]:
     """
     Перебираем несколько моделей (как сделал бы мидл-DS),
-    считаем метрики и выбираем лучшую.
+    считаем метрики с k-fold CV и выбираем лучшую.
 
     Возвращаем словарь:
     {
@@ -392,44 +392,52 @@ def auto_model_search(
 
     preprocessor = build_preprocessor(X)
 
-    # 2. train/val split
+    # 2. CV-стратегия и метрики
     if task_type == "classification":
         counts = y.value_counts(dropna=False)
         can_stratify = (counts >= 2).all()
-        X_train, X_val, y_train, y_val = train_test_split(
-            X,
-            y,
-            test_size=0.2,
-            random_state=42,
-            stratify=y if can_stratify else None,
-        )
+        if can_stratify:
+            cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        else:
+            cv = KFold(n_splits=5, shuffle=True, random_state=42)
+
+        n_classes = int(y.nunique())
+        scoring = {
+            "accuracy": "accuracy",
+            "f1": "f1_weighted",
+        }
+        if n_classes == 2:
+            scoring["roc_auc"] = "roc_auc"
+            scoring["pr_auc"] = "average_precision"
     else:
         can_stratify = False
-        X_train, X_val, y_train, y_val = train_test_split(
-            X, y, test_size=0.2, random_state=42
-        )
+        cv = KFold(n_splits=5, shuffle=True, random_state=42)
+        scoring = {
+            "rmse": "neg_root_mean_squared_error",
+        }
 
-    # 3. список кандидатов как у мидла
+    # 3. список кандидатов
     models_cfg: list[dict] = []
 
     if task_type == "classification":
-        class_weight = "balanced" if problems.get("class_imbalance") else None
+        # если есть дисбаланс — используем class_weight='balanced'
+        use_balanced = bool(problems.get("class_imbalance"))
+        cw = "balanced" if use_balanced else None
 
-        # Логистическая регрессия
         models_cfg.append(
             {
                 "name": "LogisticRegression",
                 "estimator": LogisticRegression(
-                    max_iter=1000,
+                    max_iter=2000,
                     n_jobs=-1,
+                    class_weight=cw,
                 ),
             }
         )
 
-        # RandomForest
         rf_params = dict(n_estimators=200, random_state=42, n_jobs=-1)
-        if class_weight is not None:
-            rf_params["class_weight"] = class_weight
+        if cw is not None:
+            rf_params["class_weight"] = cw
         models_cfg.append(
             {
                 "name": "RandomForestClassifier",
@@ -437,7 +445,6 @@ def auto_model_search(
             }
         )
 
-        # Gradient Boosting
         models_cfg.append(
             {
                 "name": "GradientBoostingClassifier",
@@ -477,7 +484,7 @@ def auto_model_search(
     leaderboard: list[dict] = []
     best_score: Optional[float] = None
     best_entry: Optional[dict] = None
-    best_pipeline = None
+    best_cfg: Optional[dict] = None
 
     for cfg in models_cfg:
         est = cfg["estimator"]
@@ -491,7 +498,15 @@ def auto_model_search(
         )
 
         try:
-            pipe.fit(X_train, y_train)
+            cv_res = cross_validate(
+                pipe,
+                X,
+                y,
+                cv=cv,
+                scoring=scoring,
+                n_jobs=-1,
+                return_train_score=False,
+            )
         except Exception as e:
             leaderboard.append(
                 {
@@ -508,48 +523,42 @@ def auto_model_search(
             "model_type": est.__class__.__name__,
         }
 
+        # усредняем метрики по фолдам
+        for key in scoring.keys():
+            test_key = f"test_{key}"
+            if test_key not in cv_res:
+                continue
+            vals = np.asarray(cv_res[test_key], dtype=float)
+            if key == "rmse":
+                # neg_root_mean_squared_error -> делаем положительный RMSE
+                metrics[key] = float(-vals.mean())
+            else:
+                metrics[key] = float(vals.mean())
+
+        # основной скор для выбора лучшей модели
         if task_type == "classification":
-            y_pred = pipe.predict(X_val)
-            acc = float(accuracy_score(y_val, y_pred))
-            f1w = float(f1_score(y_val, y_pred, average="weighted"))
+            primary = metrics.get("f1")
+            if primary is None:
+                primary = metrics.get("accuracy", float("-inf"))
+        else:
+            rmse = metrics.get("rmse")
+            primary = -rmse if rmse is not None else float("-inf")
 
-            metrics["accuracy"] = acc
-            metrics["f1"] = f1w
-
-            # ROC-AUC и PR-AUC для бинарки
-            if y_val.nunique() == 2 and hasattr(pipe, "predict_proba"):
-                try:
-                    proba = pipe.predict_proba(X_val)[:, 1]
-                    roc = float(roc_auc_score(y_val, proba))
-                    pr = float(average_precision_score(y_val, proba))
-                    metrics["roc_auc"] = roc
-                    metrics["pr_auc"] = pr
-                except Exception:
-                    pass
-
-            primary_score = f1w
-
-        else:  # regression
-            y_pred = pipe.predict(X_val)
-            mse = float(mean_squared_error(y_val, y_pred))
-            rmse = mse ** 0.5
-            metrics["rmse"] = rmse
-            primary_score = -rmse  # меньше rmse -> лучше, поэтому минус
-
-        metrics["primary_score"] = primary_score
+        metrics["primary_score"] = primary
         leaderboard.append(metrics)
 
-        if (best_score is None) or (primary_score > best_score):
-            best_score = primary_score
+        if (best_score is None) or (primary > best_score):
+            best_score = primary
             best_entry = metrics
-            best_pipeline = pipe
+            best_cfg = cfg
 
-    # сортируем лидерборд
     leaderboard_sorted = sorted(
-        leaderboard, key=lambda x: x.get("primary_score", float("-inf")), reverse=True
+        leaderboard,
+        key=lambda x: x.get("primary_score", float("-inf")),
+        reverse=True,
     )
 
-    if best_entry is None:
+    if best_entry is None or best_cfg is None:
         return {
             "best_model": {
                 "model_type": "skipped",
@@ -559,14 +568,25 @@ def auto_model_search(
             "pipeline": None,
         }
 
-    # добавим тренировочный лог
+    # финальная модель: обучаем лучшую на всех данных
+    best_est = best_cfg["estimator"]
+    best_pipeline = Pipeline(
+        steps=[
+            ("preprocess", build_preprocessor(X)),  # новый препроцессор на всём X
+            ("model", best_est),
+        ]
+    )
+    best_pipeline.fit(X, y)
+
     best_model = dict(best_entry)
+    best_model["model_type"] = best_entry.get("model_type")
     best_model["training_log"] = {
         "dropped_columns": drop_cols,
-        "stratified_split": bool(can_stratify),
+        "stratified_split": bool(task_type == "classification" and can_stratify),
         "used_class_weight": bool(
             task_type == "classification" and problems.get("class_imbalance")
         ),
+        "cv_folds": cv.get_n_splits(),
     }
 
     return {
@@ -574,6 +594,7 @@ def auto_model_search(
         "leaderboard": leaderboard_sorted,
         "pipeline": best_pipeline if return_pipeline else None,
     }
+
 
 
 
@@ -676,6 +697,64 @@ def build_report(
     return "\n".join(lines)
 
 
+def _detect_class_imbalance_advanced(y: pd.Series) -> dict | None:
+    """
+    Расширенный анализ дисбаланса:
+    - ratio majority/minority
+    - severity: none / moderate / heavy / extreme
+    - suggest_redefine_target=True при очень тяжёлой задаче
+
+    ВАЖНО: возвращаем и новые поля (majority_class/...), и старые алиасы
+    (max_class/min_class/...), чтобы не ломать остальной код.
+    """
+    from collections import Counter
+
+    y_arr = np.array(y)
+    cnt = Counter(y_arr)
+
+    if len(cnt) <= 1:
+        return None
+
+    total = sum(cnt.values())
+    majority_class, majority_cnt = max(cnt.items(), key=lambda x: x[1])
+    minority_class, minority_cnt = min(cnt.items(), key=lambda x: x[1])
+
+    ratio = majority_cnt / max(1, minority_cnt)
+
+    if ratio < 3:
+        severity = "none"
+    elif ratio < 10:
+        severity = "moderate"
+    elif ratio < 30:
+        severity = "heavy"
+    else:
+        severity = "extreme"
+
+    n_classes = len(cnt)
+    suggest_redefine = severity in ("heavy", "extreme") and n_classes >= 5
+
+    return {
+        # новые поля
+        "found": ratio >= 3,
+        "ratio": float(ratio),
+        "majority_class": str(majority_class),
+        "majority_count": int(majority_cnt),
+        "minority_class": str(minority_class),
+        "minority_count": int(minority_cnt),
+        "total": int(total),
+        "n_classes": int(n_classes),
+        "severity": severity,
+        "suggest_redefine_target": suggest_redefine,
+
+        # алиасы для старого кода (чтобы не падал KeyError)
+        "max_class": str(majority_class),
+        "max_count": int(majority_cnt),
+        "min_class": str(minority_class),
+        "min_count": int(minority_cnt),
+    }
+
+
+
 # ---------------------------------------------------------------------
 # 6. анализ проблем датасета
 # ---------------------------------------------------------------------
@@ -744,22 +823,12 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
         if n_nan_target > 0:
             problems["target_has_nan"] = {"column": target, "nan_count": n_nan_target}
 
-    # дисбаланс классов
+        # дисбаланс классов (расширенная версия)
     if task.get("task") == "classification" and target and target in df.columns:
-        vc = df[target].value_counts(dropna=False)
-        if len(vc) >= 2:
-            max_c = int(vc.iloc[0])
-            min_c = int(vc.iloc[-1])
-            ratio = max_c / max(1, min_c)
-            if ratio >= 5:
-                problems["class_imbalance"] = {
-                    "n_classes": int(len(vc)),
-                    "max_class": str(vc.index[0]),
-                    "max_count": max_c,
-                    "min_class": str(vc.index[-1]),
-                    "min_count": min_c,
-                    "ratio": float(ratio),
-                }
+        ci = _detect_class_imbalance_advanced(df[target])
+        if ci is not None and ci["found"]:
+            problems["class_imbalance"] = ci
+
 
     # высокая кардинальность
     high_cardinality = []
