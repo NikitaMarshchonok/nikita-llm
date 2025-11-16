@@ -345,7 +345,10 @@ def auto_model_search(
     Теперь:
     - есть holdout-метрики (train/val сплит)
     - есть k-fold cross-validation (3 фолда)
-    - primary_score = средний CV-score (f1_weighted для классификации, RMSE для регрессии)
+    - primary_score:
+        * для регрессии — RMSE (со знаком минус)
+        * для классификации — f1_weighted
+          или PR-AUC, если есть дисбаланс и 2 класса
     """
     problems = problems or {}
     task_type = task.get("task")
@@ -390,10 +393,23 @@ def auto_model_search(
 
     preprocessor = build_preprocessor(X)
 
-    # 2. holdout + CV-стратегия
+    # -------------------------------------------------------------
+    # 2. holdout + CV-стратегия + выбор основной метрики
+    # -------------------------------------------------------------
+    primary_metric_name: str
+
     if task_type == "classification":
         counts = y.value_counts(dropna=False)
         can_stratify = (counts >= 2).all()
+
+        n_classes = int(y.nunique())
+        has_imbalance = bool(problems.get("class_imbalance"))
+
+        # если дисбаланс и бинарная классификация → оптимизируем PR-AUC
+        if has_imbalance and n_classes == 2:
+            primary_metric_name = "pr_auc"
+        else:
+            primary_metric_name = "f1"
 
         # holdout-сплит
         X_train, X_val, y_train, y_val = train_test_split(
@@ -409,17 +425,32 @@ def auto_model_search(
             cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
         else:
             cv = KFold(n_splits=3, shuffle=True, random_state=42)
+
+        # какие метрики считаем на CV
+        clf_scoring = {
+            "f1_weighted": "f1_weighted",
+            "accuracy": "accuracy",
+        }
+        if n_classes == 2:
+            clf_scoring["roc_auc"] = "roc_auc"
+            clf_scoring["pr_auc"] = "average_precision"
+
     else:
         can_stratify = False
+        primary_metric_name = "rmse"
         X_train, X_val, y_train, y_val = train_test_split(
             X, y, test_size=0.2, random_state=42
         )
         cv = KFold(n_splits=3, shuffle=True, random_state=42)
+        reg_scoring = {"mse": "neg_mean_squared_error"}
 
-    # 3. список кандидатов
+    # -------------------------------------------------------------
+    # 3. Список кандидатов
+    # -------------------------------------------------------------
     models_cfg: list[dict] = []
 
     if task_type == "classification":
+        # если нашли дисбаланс — используем class_weight='balanced'
         class_weight = "balanced" if problems.get("class_imbalance") else None
 
         models_cfg.append(
@@ -428,13 +459,12 @@ def auto_model_search(
                 "estimator": LogisticRegression(
                     max_iter=2000,
                     n_jobs=-1,
-                    # class_weight может быть None или 'balanced'
-                    class_weight=class_weight,
+                    class_weight=class_weight,  # может быть None или 'balanced'
                 ),
             }
         )
 
-        rf_params = dict(n_estimATORS=200, random_state=42, n_jobs=-1)
+        rf_params = dict(n_estimators=200, random_state=42, n_jobs=-1)
         if class_weight is not None:
             rf_params["class_weight"] = class_weight
         models_cfg.append(
@@ -480,6 +510,9 @@ def auto_model_search(
             "pipeline": None,
         }
 
+    # -------------------------------------------------------------
+    # 4. Обучаем кандидатов + считаем метрики
+    # -------------------------------------------------------------
     leaderboard: list[dict] = []
     best_score: Optional[float] = None
     best_entry: Optional[dict] = None
@@ -525,7 +558,7 @@ def auto_model_search(
             metrics["val_accuracy"] = acc
             metrics["val_f1"] = f1w
 
-            # для бинарки считаем ROC-AUC и PR-AUC
+            # для бинарной классификации считаем ROC-AUC и PR-AUC
             if y_val.nunique() == 2 and hasattr(pipe, "predict_proba"):
                 try:
                     proba = pipe.predict_proba(X_val)[:, 1]
@@ -536,6 +569,7 @@ def auto_model_search(
                 except Exception:
                     pass
 
+            # временно ставим primary = F1, потом можем перезаписать после CV
             primary_score = f1w
 
         else:  # regression
@@ -553,38 +587,55 @@ def auto_model_search(
                     X,
                     y,
                     cv=cv,
-                    scoring={
-                        "f1_weighted": "f1_weighted",
-                        "accuracy": "accuracy",
-                    },
+                    scoring=clf_scoring,
                     n_jobs=-1,
                 )
-                cv_f1 = cv_res["test_f1_weighted"]
-                cv_acc = cv_res["test_accuracy"]
-                metrics["cv_f1_mean"] = float(cv_f1.mean())
-                metrics["cv_f1_std"] = float(cv_f1.std())
-                metrics["cv_accuracy_mean"] = float(cv_acc.mean())
-                metrics["cv_accuracy_std"] = float(cv_acc.std())
 
-                primary_score = metrics["cv_f1_mean"]
-            else:
+                if "f1_weighted" in clf_scoring:
+                    cv_f1 = cv_res["test_f1_weighted"]
+                    metrics["cv_f1_mean"] = float(cv_f1.mean())
+                    metrics["cv_f1_std"] = float(cv_f1.std())
+
+                if "accuracy" in clf_scoring:
+                    cv_acc = cv_res["test_accuracy"]
+                    metrics["cv_accuracy_mean"] = float(cv_acc.mean())
+                    metrics["cv_accuracy_std"] = float(cv_acc.std())
+
+                if "pr_auc" in clf_scoring and "test_pr_auc" in cv_res:
+                    cv_pr = cv_res["test_pr_auc"]
+                    metrics["cv_pr_auc_mean"] = float(cv_pr.mean())
+                    metrics["cv_pr_auc_std"] = float(cv_pr.std())
+
+                if "roc_auc" in clf_scoring and "test_roc_auc" in cv_res:
+                    cv_roc = cv_res["test_roc_auc"]
+                    metrics["cv_roc_auc_mean"] = float(cv_roc.mean())
+                    metrics["cv_roc_auc_std"] = float(cv_roc.std())
+
+                # финальный выбор primary-метрики
+                if primary_metric_name == "pr_auc" and "cv_pr_auc_mean" in metrics:
+                    primary_score = metrics["cv_pr_auc_mean"]
+                elif "cv_f1_mean" in metrics:
+                    primary_score = metrics["cv_f1_mean"]
+                elif "cv_accuracy_mean" in metrics:
+                    primary_score = metrics["cv_accuracy_mean"]
+
+            else:  # regression
                 cv_res = cross_validate(
                     pipe,
                     X,
                     y,
                     cv=cv,
-                    scoring={"mse": "neg_mean_squared_error"},
+                    scoring=reg_scoring,
                     n_jobs=-1,
                 )
                 cv_mse = -cv_res["test_mse"]
                 cv_rmse = np.sqrt(cv_mse)
                 metrics["cv_rmse_mean"] = float(cv_rmse.mean())
                 metrics["cv_rmse_std"] = float(cv_rmse.std())
-
                 primary_score = -metrics["cv_rmse_mean"]
-        except Exception:
+        except Exception as e:
             # если CV упал, остаёмся только с holdout-метриками
-            pass
+            metrics["cv_error"] = str(e)
 
         metrics["primary_score"] = primary_score
         leaderboard.append(metrics)
@@ -615,6 +666,7 @@ def auto_model_search(
         "used_class_weight": bool(
             task_type == "classification" and problems.get("class_imbalance")
         ),
+        "primary_metric": primary_metric_name,
     }
 
     if not return_pipeline:
@@ -625,7 +677,6 @@ def auto_model_search(
         "leaderboard": leaderboard_sorted,
         "pipeline": best_pipeline,
     }
-
 
 
 
