@@ -32,6 +32,7 @@ from agent.tools import (
     detect_column_roles,
     build_experiment_plan,
     auto_model_search,
+    suggest_targets,
 )
 
 # ---------------------------
@@ -421,6 +422,13 @@ async def upload_dataset(
         # 5.4) идеи фич
         feature_suggestions = auto_feature_suggestions(df)
 
+        # 5.5) кандидаты в таргет (для переключения таргета вручную)
+        target_suggestions = suggest_targets(
+            df,
+            problems=problems,
+            current_target=task.get("target"),
+        )
+
         # 6) авто-поиск лучшей модели
         model_res: Optional[Dict[str, Any]] = None
         pipeline = None
@@ -510,6 +518,7 @@ async def upload_dataset(
             "feature_importance": feature_importance,
             "code_hints": code_hints,
             "experiment_plan": experiment_plan,
+            "target_suggestions": target_suggestions,
             "columns": list(df.columns),
         }
         if pipeline is not None:
@@ -535,6 +544,7 @@ async def upload_dataset(
             "feature_suggestions",
             "feature_importance",
             "code_hints",
+            "target_suggestions",
         ]
         payload = {key: RUNS[run_id].get(key) for key in payload_keys}
         return JSONResponse(content=jsonable_encoder(payload))

@@ -146,6 +146,90 @@ def detect_task(df: pd.DataFrame, target: Optional[str] = None) -> dict:
 
 
 # ---------------------------------------------------------------------
+# 2.1. Подбор кандидатных таргетов
+# ---------------------------------------------------------------------
+def suggest_targets(
+    df: pd.DataFrame,
+    problems: dict | None = None,
+    current_target: str | None = None,
+) -> dict:
+    """
+    Подбирает кандидатные таргеты из колонок датафрейма.
+    ...
+    """
+    problems = problems or {}
+    id_like = set(problems.get("id_like") or [])
+
+    candidates: list[dict] = []
+
+    for col in df.columns:
+        # не предлагать id-подобные
+        if col in id_like:
+            continue
+
+        s = df[col]
+        nunique = s.nunique(dropna=False)
+        dtype = str(s.dtype)
+
+        if nunique <= 1:
+            continue
+
+        # числовые
+        if pd.api.types.is_numeric_dtype(s):
+            if 2 <= nunique <= 50:
+                candidates.append(
+                    {
+                        "col": col,
+                        "type": "classification",
+                        "n_unique": int(nunique),
+                        "dtype": dtype,
+                        "reason": "числовой признак с 2–50 уникальных значений → подходит как классификационный таргет",
+                    }
+                )
+            elif nunique > 50:
+                candidates.append(
+                    {
+                        "col": col,
+                        "type": "regression",
+                        "n_unique": int(nunique),
+                        "dtype": dtype,
+                        "reason": "числовой признак с большим числом уникальных значений → подходит как регрессионный таргет",
+                    }
+                )
+        # категориальные
+        else:
+            if 2 <= nunique <= 100:
+                candidates.append(
+                    {
+                        "col": col,
+                        "type": "classification",
+                        "n_unique": int(nunique),
+                        "dtype": dtype,
+                        "reason": "категориальный признак с 2–100 уникальных значений → классификация",
+                    }
+                )
+
+    # default_target
+    default_target = None
+    if current_target and any(c["col"] == current_target for c in candidates):
+        default_target = current_target
+    else:
+        for c in candidates:
+            if c["type"] == "classification":
+                default_target = c["col"]
+                break
+        if default_target is None and candidates:
+            default_target = candidates[0]["col"]
+
+    return {
+        "current_target": current_target,
+        "default_target": default_target,
+        "candidates": candidates,
+    }
+
+
+
+# ---------------------------------------------------------------------
 # 3. приведение строк к числам и препроцессинг
 # ---------------------------------------------------------------------
 def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
