@@ -33,6 +33,7 @@ from agent.tools import (
     build_experiment_plan,
     auto_model_search,
     suggest_targets,
+    
 )
 
 # ---------------------------
@@ -404,14 +405,22 @@ async def upload_dataset(
         # 4) задача
         task = detect_task(df, target=target)
 
-        # 5) диагностика
+                # 5) диагностика
         problems = analyze_dataset(df, task)
+
+        # 5.0) кандидаты таргета (на основе текущего анализа)
+        target_suggestions = suggest_targets(
+            df,
+            problems=problems,
+            current_target=task.get("target"),
+        )
 
         # 5.1) короткая сводка по таргету
         target_summary = summarize_target(df, task)
 
         # 5.1.1) роли колонок (id / datetime / text / ...)
         column_roles = detect_column_roles(df, task)
+
 
         # 5.2) ранжированный список проблем (high/medium/low)
         problem_list = rank_problems(problems)
