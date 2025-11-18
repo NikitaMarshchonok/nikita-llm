@@ -403,7 +403,10 @@ async def upload_dataset(
                     "used_rows": MAX_ROWS,
                     "strategy": "random_sample",
                     "random_state": 42,
-                    "note": f"Датасет был случайно подсэмплирован до {MAX_ROWS} строк для ускорения анализа и обучения.",
+                    "note": (
+                        f"Датасет был случайно подсэмплирован до {MAX_ROWS} строк "
+                        "для ускорения анализа и обучения."
+                    ),
                 }
             )
 
@@ -422,6 +425,10 @@ async def upload_dataset(
 
         # 3) EDA (по подсэмплированному df)
         eda = basic_eda(df)
+        # добавим метаданные по сэмплированию в EDA
+        eda["original_rows"] = original_rows
+        eda["used_rows"] = sampling_info["used_rows"]
+        eda["sampling_applied"] = sampling_info["applied"]
 
         # 4) задача
         task = detect_task(df, target=target)
@@ -591,7 +598,6 @@ async def upload_dataset(
                 "hint": "проверь файл и target",
             },
         )
-
 
 # ---------------------------
 # Inference
