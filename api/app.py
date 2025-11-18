@@ -33,7 +33,6 @@ from agent.tools import (
     build_experiment_plan,
     auto_model_search,
     suggest_targets,
-    
 )
 
 # ---------------------------
@@ -55,6 +54,9 @@ app.add_middleware(
 # JSON-safe данные отдельно от несериализуемых объектов (pipelines)
 RUNS: Dict[str, Dict[str, Any]] = {}
 PIPELINES: Dict[str, Any] = {}
+
+# Ограничение размера датасета для анализа/обучения
+MAX_ROWS: int = int(os.getenv("DS_AGENT_MAX_ROWS", "25000"))
 
 
 # ---------------------------
@@ -386,6 +388,25 @@ async def upload_dataset(
         df = read_any_table(contents, file.filename)
         df = normalize_columns(df)
 
+        # 1.1) ограничение по размеру датасета
+        original_rows = int(len(df))
+        sampling_info: Dict[str, Any] = {
+            "applied": False,
+            "original_rows": original_rows,
+            "used_rows": original_rows,
+        }
+        if original_rows > MAX_ROWS:
+            df = df.sample(n=MAX_ROWS, random_state=42).reset_index(drop=True)
+            sampling_info.update(
+                {
+                    "applied": True,
+                    "used_rows": MAX_ROWS,
+                    "strategy": "random_sample",
+                    "random_state": 42,
+                    "note": f"Датасет был случайно подсэмплирован до {MAX_ROWS} строк для ускорения анализа и обучения.",
+                }
+            )
+
         # 2) нормализуем target; пустую строку считаем отсутствующим
         if target is not None:
             target = target.strip()
@@ -399,13 +420,13 @@ async def upload_dataset(
                     .replace("/", "_")
                 )
 
-        # 3) EDA
+        # 3) EDA (по подсэмплированному df)
         eda = basic_eda(df)
 
         # 4) задача
         task = detect_task(df, target=target)
 
-                # 5) диагностика
+        # 5) диагностика
         problems = analyze_dataset(df, task)
 
         # 5.0) кандидаты таргета (на основе текущего анализа)
@@ -421,7 +442,6 @@ async def upload_dataset(
         # 5.1.1) роли колонок (id / datetime / text / ...)
         column_roles = detect_column_roles(df, task)
 
-
         # 5.2) ранжированный список проблем (high/medium/low)
         problem_list = rank_problems(problems)
 
@@ -430,13 +450,6 @@ async def upload_dataset(
 
         # 5.4) идеи фич
         feature_suggestions = auto_feature_suggestions(df)
-
-        # 5.5) кандидаты в таргет (для переключения таргета вручную)
-        target_suggestions = suggest_targets(
-            df,
-            problems=problems,
-            current_target=task.get("target"),
-        )
 
         # 6) авто-поиск лучшей модели
         model_res: Optional[Dict[str, Any]] = None
@@ -529,6 +542,7 @@ async def upload_dataset(
             "experiment_plan": experiment_plan,
             "target_suggestions": target_suggestions,
             "columns": list(df.columns),
+            "sampling": sampling_info,
         }
         if pipeline is not None:
             PIPELINES[run_id] = pipeline
@@ -554,6 +568,7 @@ async def upload_dataset(
             "feature_importance",
             "code_hints",
             "target_suggestions",
+            "sampling",
         ]
         payload = {key: RUNS[run_id].get(key) for key in payload_keys}
         return JSONResponse(content=jsonable_encoder(payload))
@@ -576,7 +591,6 @@ async def upload_dataset(
                 "hint": "проверь файл и target",
             },
         )
-
 
 
 # ---------------------------
