@@ -1,4 +1,3 @@
-# agent/tools.py
 from __future__ import annotations
 
 import os
@@ -34,111 +33,6 @@ import joblib
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
-def suggest_targets(
-    df: pd.DataFrame,
-    problems: dict | None = None,
-    current_target: str | None = None,
-) -> dict:
-    """
-    Подбирает кандидатные таргеты из колонок датафрейма.
-
-    Возвращает словарь:
-    {
-      "current_target": "last_season",          # тот, с которым сейчас считался отчёт
-      "default_target": "last_season",          # что агент считает самым логичным
-      "candidates": [
-        {
-          "col": "last_season",
-          "type": "classification",             # или "regression"
-          "n_unique": 13,
-          "dtype": "int64",
-          "reason": "числовой признак с 2–50 уникальных → подходит как классификационный таргет",
-        },
-        ...
-      ],
-    }
-    """
-    problems = problems or {}
-    id_like = set(problems.get("id_like") or [])
-
-    candidates: list[dict] = []
-
-    for col in df.columns:
-        # не предлагать id-подобные
-        if col in id_like:
-            continue
-
-        s = df[col]
-        nunique = s.nunique(dropna=False)
-        dtype = str(s.dtype)
-
-        # сильно константные нам не интересны как таргет
-        if nunique <= 1:
-            continue
-
-        # --- числовые колонки ---
-        if pd.api.types.is_numeric_dtype(s):
-            if 2 <= nunique <= 50:
-                # немного классов → классификация
-                candidates.append(
-                    {
-                        "col": col,
-                        "type": "classification",
-                        "n_unique": int(nunique),
-                        "dtype": dtype,
-                        "reason": "числовой признак с 2–50 уникальных значений → подходит как классификационный таргет",
-                    }
-                )
-            elif nunique > 50:
-                # много уникальных → регрессия
-                candidates.append(
-                    {
-                        "col": col,
-                        "type": "regression",
-                        "n_unique": int(nunique),
-                        "dtype": dtype,
-                        "reason": "числовой признак с большим числом уникальных значений → подходит как регрессионный таргет",
-                    }
-                )
-
-        # --- категориальные / объектные ---
-        else:
-            if 2 <= nunique <= 100:
-                candidates.append(
-                    {
-                        "col": col,
-                        "type": "classification",
-                        "n_unique": int(nunique),
-                        "dtype": dtype,
-                        "reason": "категориальный признак с 2–100 уникальных значений → классификация",
-                    }
-                )
-            # если там тысячи уникальных (типа `name`), не предлагаем как таргет
-
-    # выбираем default_target:
-    # 1) если есть current_target — оставляем его
-    # 2) иначе берём первый классификационный
-    # 3) если нет классификационных — первый из всех кандидатов
-    default_target = None
-
-    if current_target and any(c["col"] == current_target for c in candidates):
-        default_target = current_target
-    else:
-        for c in candidates:
-            if c["type"] == "classification":
-                default_target = c["col"]
-                break
-        if default_target is None and candidates:
-            default_target = candidates[0]["col"]
-
-    return {
-        "current_target": current_target,
-        "default_target": default_target,
-        "candidates": candidates,
-    }
-
-
 
 
 # ---------------------------------------------------------------------
@@ -260,7 +154,22 @@ def suggest_targets(
 ) -> dict:
     """
     Подбирает кандидатные таргеты из колонок датафрейма.
-    ...
+
+    Возвращает словарь:
+    {
+      "current_target": "last_season",
+      "default_target": "last_season",
+      "candidates": [
+        {
+          "col": "last_season",
+          "type": "classification",  # или "regression"
+          "n_unique": 13,
+          "dtype": "int64",
+          "reason": "...",
+        },
+        ...
+      ],
+    }
     """
     problems = problems or {}
     id_like = set(problems.get("id_like") or [])
@@ -331,7 +240,6 @@ def suggest_targets(
         "default_target": default_target,
         "candidates": candidates,
     }
-
 
 
 # ---------------------------------------------------------------------
@@ -680,7 +588,7 @@ def auto_model_search(
                 {
                     "name": "RandomForestRegressor",
                     "estimator": RandomForestRegressor(
-                        n_estimators=200, random_state=42, n_jobs=-1
+                        n_estimators=200, random_state=42, 
                     ),
                 },
                 {
@@ -868,7 +776,6 @@ def auto_model_search(
     }
 
 
-
 # ---------------------------------------------------------------------
 # 5. отчёт (текст для UI и markdown)
 # ---------------------------------------------------------------------
@@ -1025,7 +932,6 @@ def _detect_class_imbalance_advanced(y: pd.Series) -> dict | None:
     }
 
 
-
 # ---------------------------------------------------------------------
 # 6. анализ проблем датасета
 # ---------------------------------------------------------------------
@@ -1094,12 +1000,11 @@ def analyze_dataset(df: pd.DataFrame, task: dict) -> dict:
         if n_nan_target > 0:
             problems["target_has_nan"] = {"column": target, "nan_count": n_nan_target}
 
-        # дисбаланс классов (расширенная версия)
+    # дисбаланс
     if task.get("task") == "classification" and target and target in df.columns:
         ci = _detect_class_imbalance_advanced(df[target])
         if ci is not None and ci["found"]:
             problems["class_imbalance"] = ci
-
 
     # высокая кардинальность
     high_cardinality = []
