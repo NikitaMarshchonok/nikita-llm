@@ -424,30 +424,75 @@
     }
 
     function renderHealth(data) {
-      const health = data.dataset_health;
-      if (!health) {
-        healthBox.innerHTML = '<span style="color:var(--text-muted);">Оценка здоровья датасета недоступна.</span>';
-        return;
-      }
-      const levelMap = { green: 'зелёный', yellow: 'жёлтый', red: 'красный' };
-      const colorMap = { green: '#22c55e', yellow: '#eab308', red: '#f97316' };
-      const level = health.level || 'yellow';
-      const score = health.score ?? '?';
-      const reasons = health.reasons || [];
+  const health   = data.dataset_health;
+  const sampling = data.sampling || {};
 
-      let html = '<h4>Оценка здоровья датасета</h4>';
-      html += `<div style="font-size:12px; margin-bottom:4px;">
-        <span style="font-weight:600; color:${colorMap[level] || 'var(--accent)'};">
-          ${score}/100 · ${levelMap[level] || level}
-        </span>
-      </div>`;
-      if (reasons.length) {
-        html += '<ul>' + reasons.map(r => `<li>${escapeHtml(r)}</li>`).join('') + '</ul>';
-      } else {
-        html += '<span style="color:var(--text-muted);">Серьёзных проблем не найдено.</span>';
-      }
-      healthBox.innerHTML = html;
+  // если вообще ничего нет — пишем, что недоступно
+  if (!health && !data.eda) {
+    healthBox.innerHTML = '<span style="color:var(--text-muted);">Оценка здоровья датасета недоступна.</span>';
+    return;
+  }
+
+  const levelMap = { green: 'зелёный', yellow: 'жёлтый', red: 'красный' };
+  const colorMap = { green: '#22c55e', yellow: '#eab308', red: '#f97316' };
+
+  const level   = (health && health.level) ?? 'yellow';
+  const score   = (health && health.score != null) ? health.score : '?';
+  const reasons = (health && health.reasons) || [];
+
+  let html = '<h4>Оценка здоровья датасета</h4>';
+
+  // Основной скор
+  html += `<div style="font-size:12px; margin-bottom:4px;">
+    <span style="font-weight:600; color:${colorMap[level] || 'var(--accent)'};">
+      ${score}/100 · ${levelMap[level] || level}
+    </span>
+  </div>`;
+
+  // ---------- Блок про сэмплирование ----------
+  let rowsTotal = sampling.original_rows;
+  let rowsUsed  = sampling.used_rows;
+  let applied   = sampling.applied;
+
+  // подстраховка: если нет sampling, берём из EDA
+  if (data.eda) {
+    if (rowsTotal == null) {
+      rowsTotal = data.eda.original_rows ?? (data.eda.shape ? data.eda.shape[0] : undefined);
     }
+    if (rowsUsed == null) {
+      rowsUsed = data.eda.used_rows ?? rowsTotal;
+    }
+  }
+
+  if (rowsTotal != null && rowsUsed != null) {
+    if (applied == null) {
+      applied = rowsUsed < rowsTotal;
+    }
+    const fmtTotal = Number(rowsTotal).toLocaleString('ru-RU');
+    const fmtUsed  = Number(rowsUsed).toLocaleString('ru-RU');
+
+    if (applied) {
+      html += `<div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">
+        ⚡ Анализ и обучение выполнены на сэмпле <strong>${fmtUsed}</strong> строк из <strong>${fmtTotal}</strong>.
+      </div>`;
+    } else {
+      html += `<div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">
+        ⚡ Анализ и обучение выполнены на всех <strong>${fmtTotal}</strong> строках датасета.
+      </div>`;
+    }
+  }
+  // ---------- /сэмплирование ----------
+
+  // Причины просадки health-score
+  if (reasons.length) {
+    html += '<ul>' + reasons.map(r => `<li>${escapeHtml(r)}</li>`).join('') + '</ul>';
+  } else {
+    html += '<span style="color:var(--text-muted);">Серьёзных проблем не найдено.</span>';
+  }
+
+  healthBox.innerHTML = html;
+}
+
 
     function renderRecommendations(data) {
       recsBox.innerHTML = '';
