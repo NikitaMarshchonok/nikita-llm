@@ -138,7 +138,7 @@
       background: var(--card);
       border-radius: var(--radius);
       padding: 14px 16px;
-      height: 34%;
+      height: 30%;
       min-height: 180px;
       overflow-y: auto;
       white-space: pre-wrap;
@@ -296,9 +296,12 @@
       <small style="font-size:11px; color:var(--text-muted);">Файл отправляется на <code>/upload</code>, бэкенд делает EDA и базовую модель.</small>
     </section>
 
-    <!-- центр: отчёт + здоровье + рекомендации + ML-подсказки + план + графики -->
+    <!-- центр: отчёт + метрики + здоровье + рекомендации + ML-подсказки + план + графики -->
     <section class="middle-panel">
       <div class="report-box" id="reportBox">Здесь появится отчёт ✨</div>
+
+      <!-- НОВЫЙ БЛОК МЕТРИК -->
+      <div class="recs-box" id="metricsBox"></div>
 
       <div class="recs-box" id="healthBox"></div>
 
@@ -341,6 +344,7 @@
     const mlHintsBox    = document.getElementById('mlHints');
     const healthBox     = document.getElementById('healthBox');
     const planBox       = document.getElementById('planBox');
+    const metricsBox    = document.getElementById('metricsBox');
     const agentQuestion = document.getElementById('agentQuestion');
     const agentAnswer   = document.getElementById('agentAnswer');
 
@@ -385,6 +389,7 @@
         currentRunId = data.run_id;
 
         renderReport(data);
+        renderMetrics(data);      // NEW
         renderHealth(data);
         renderRecommendations(data);
         renderMLHints(data);
@@ -423,76 +428,92 @@
       reportBox.textContent = txt;
     }
 
+    // НОВЫЙ БЛОК: МЕТРИКИ МОДЕЛИ
+    function renderMetrics(data) {
+      metricsBox.innerHTML = '';
+
+      const model = data.model;
+      if (!model) {
+        metricsBox.innerHTML = '<span style="color:var(--text-muted);">Модель ещё не обучена или задача = только EDA.</span>';
+        return;
+      }
+
+      const taskType = (data.task && data.task.task) || '';
+      const fmt = (v) =>
+        (typeof v === 'number'
+          ? v.toFixed(3)
+          : (v === null || v === undefined ? '—' : String(v)));
+
+      let html = '<h4>Метрики модели</h4>';
+
+      if (taskType === 'classification') {
+        html += '<ul>';
+        if (model.accuracy != null)
+          html += `<li><strong>Accuracy</strong>: ${fmt(model.accuracy)} — доля верных предсказаний.</li>`;
+        if (model.precision != null)
+          html += `<li><strong>Precision</strong>: ${fmt(model.precision)} — насколько чисты положительные предсказания.</li>`;
+        if (model.recall != null)
+          html += `<li><strong>Recall</strong>: ${fmt(model.recall)} — как хорошо находим все положительные объекты.</li>`;
+        if (model.f1 != null)
+          html += `<li><strong>F1</strong>: ${fmt(model.f1)} — баланс между precision и recall.</li>`;
+        if (model.roc_auc != null)
+          html += `<li><strong>ROC-AUC</strong>: ${fmt(model.roc_auc)} — важно при дисбалансе классов.</li>`;
+        if (model.pr_auc != null)
+          html += `<li><strong>PR-AUC</strong>: ${fmt(model.pr_auc)} — ещё один важный скор при сильном дисбалансе.</li>`;
+        html += '</ul>';
+      } else if (taskType === 'regression') {
+        html += '<ul>';
+        if (model.mae != null)
+          html += `<li><strong>MAE</strong>: ${fmt(model.mae)} — средняя абсолютная ошибка.</li>`;
+        if (model.rmse != null)
+          html += `<li><strong>RMSE</strong>: ${fmt(model.rmse)} — штрафует за большие ошибки.</li>`;
+        if (model.r2 != null)
+          html += `<li><strong>R²</strong>: ${fmt(model.r2)} — доля объяснённой вариации таргета.</li>`;
+        if (model.mape != null)
+          html += `<li><strong>MAPE</strong>: ${fmt(model.mape)} — средняя процентная ошибка.</li>`;
+        html += '</ul>';
+      } else {
+        html += '<span style="color:var(--text-muted);">Тип задачи не распознан, но часть метрик доступна.</span>';
+      }
+
+      // Если есть confusion_matrix — покажем текстом
+      if (Array.isArray(model.confusion_matrix)) {
+        html += `
+          <div style="margin-top:6px; font-size:11px; color:var(--text-muted);">
+            Confusion matrix (как есть, по классам):
+          </div>
+          <pre><code>${escapeHtml(JSON.stringify(model.confusion_matrix))}</code></pre>
+        `;
+      }
+
+      metricsBox.innerHTML = html;
+    }
+
     function renderHealth(data) {
-  const health   = data.dataset_health;
-  const sampling = data.sampling || {};
+      const health = data.dataset_health;
+      if (!health) {
+        healthBox.innerHTML = '<span style="color:var(--text-muted);">Оценка здоровья датасета недоступна.</span>';
+        return;
+      }
+      const levelMap = { green: 'зелёный', yellow: 'жёлтый', red: 'красный' };
+      const colorMap = { green: '#22c55e', yellow: '#eab308', red: '#f97316' };
+      const level = health.level || 'yellow';
+      const score = health.score ?? '?';
+      const reasons = health.reasons || [];
 
-  // если вообще ничего нет — пишем, что недоступно
-  if (!health && !data.eda) {
-    healthBox.innerHTML = '<span style="color:var(--text-muted);">Оценка здоровья датасета недоступна.</span>';
-    return;
-  }
-
-  const levelMap = { green: 'зелёный', yellow: 'жёлтый', red: 'красный' };
-  const colorMap = { green: '#22c55e', yellow: '#eab308', red: '#f97316' };
-
-  const level   = (health && health.level) ?? 'yellow';
-  const score   = (health && health.score != null) ? health.score : '?';
-  const reasons = (health && health.reasons) || [];
-
-  let html = '<h4>Оценка здоровья датасета</h4>';
-
-  // Основной скор
-  html += `<div style="font-size:12px; margin-bottom:4px;">
-    <span style="font-weight:600; color:${colorMap[level] || 'var(--accent)'};">
-      ${score}/100 · ${levelMap[level] || level}
-    </span>
-  </div>`;
-
-  // ---------- Блок про сэмплирование ----------
-  let rowsTotal = sampling.original_rows;
-  let rowsUsed  = sampling.used_rows;
-  let applied   = sampling.applied;
-
-  // подстраховка: если нет sampling, берём из EDA
-  if (data.eda) {
-    if (rowsTotal == null) {
-      rowsTotal = data.eda.original_rows ?? (data.eda.shape ? data.eda.shape[0] : undefined);
-    }
-    if (rowsUsed == null) {
-      rowsUsed = data.eda.used_rows ?? rowsTotal;
-    }
-  }
-
-  if (rowsTotal != null && rowsUsed != null) {
-    if (applied == null) {
-      applied = rowsUsed < rowsTotal;
-    }
-    const fmtTotal = Number(rowsTotal).toLocaleString('ru-RU');
-    const fmtUsed  = Number(rowsUsed).toLocaleString('ru-RU');
-
-    if (applied) {
-      html += `<div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">
-        ⚡ Анализ и обучение выполнены на сэмпле <strong>${fmtUsed}</strong> строк из <strong>${fmtTotal}</strong>.
+      let html = '<h4>Оценка здоровья датасета</h4>';
+      html += `<div style="font-size:12px; margin-bottom:4px;">
+        <span style="font-weight:600; color:${colorMap[level] || 'var(--accent)'};">
+          ${score}/100 · ${levelMap[level] || level}
+        </span>
       </div>`;
-    } else {
-      html += `<div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">
-        ⚡ Анализ и обучение выполнены на всех <strong>${fmtTotal}</strong> строках датасета.
-      </div>`;
+      if (reasons.length) {
+        html += '<ul>' + reasons.map(r => `<li>${escapeHtml(r)}</li>`).join('') + '</ul>';
+      } else {
+        html += '<span style="color:var(--text-muted);">Серьёзных проблем не найдено.</span>';
+      }
+      healthBox.innerHTML = html;
     }
-  }
-  // ---------- /сэмплирование ----------
-
-  // Причины просадки health-score
-  if (reasons.length) {
-    html += '<ul>' + reasons.map(r => `<li>${escapeHtml(r)}</li>`).join('') + '</ul>';
-  } else {
-    html += '<span style="color:var(--text-muted);">Серьёзных проблем не найдено.</span>';
-  }
-
-  healthBox.innerHTML = html;
-}
-
 
     function renderRecommendations(data) {
       recsBox.innerHTML = '';
@@ -652,6 +673,7 @@
         currentRunId = runId;
 
         renderReport(data);
+        renderMetrics(data);      // NEW
         renderHealth(data);
         renderRecommendations(data);
         renderMLHints(data);

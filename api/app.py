@@ -33,6 +33,7 @@ from agent.tools import (
     build_experiment_plan,
     auto_model_search,
     suggest_targets,
+    apply_auto_fixes_for_inference,
 )
 
 # ---------------------------
@@ -458,13 +459,16 @@ async def upload_dataset(
         # 5.4) идеи фич
         feature_suggestions = auto_feature_suggestions(df)
 
-        # 6) авто-поиск лучшей модели
+        # 6) авто-поиск лучшей модели + авто-фиксы
         model_res: Optional[Dict[str, Any]] = None
         pipeline = None
         model_leaderboard: Optional[list] = None
         feature_importance: List[Dict[str, Any]] = []
+        auto_fixes: Optional[Dict[str, Any]] = None
+        train_columns_for_alignment: List[str] = list(df.columns)
 
         if task["task"] != "eda" and task.get("target"):
+            # 6.1 auto_model_search
             try:
                 auto_res = auto_model_search(df, task, problems)
             except Exception:
@@ -475,7 +479,13 @@ async def upload_dataset(
                 pipeline = auto_res.get("pipeline")
                 model_leaderboard = auto_res.get("leaderboard")
 
-            # fallback: если всё упало — старый train_baseline
+                # достаём auto_fixes из training_log
+                training_log = (model_res or {}).get("training_log") or {}
+                af = training_log.get("auto_fixes")
+                if isinstance(af, dict):
+                    auto_fixes = af
+
+            # 6.2 fallback: train_baseline, если auto_model_search не сработал
             if model_res is None or model_res.get("model_type") == "skipped":
                 baseline = train_baseline(
                     df,
@@ -489,14 +499,29 @@ async def upload_dataset(
                         pipeline = baseline.pop("pipeline")
                     model_res = baseline
 
-        # 6.1) feature importance, если смогли обучить pipeline
+                    training_log = (model_res or {}).get("training_log") or {}
+                    af = training_log.get("auto_fixes")
+                    if isinstance(af, dict):
+                        auto_fixes = af
+
+        # 6.3) вычисляем тренировочные колонки с учётом авто-фиксов
+        try:
+            if auto_fixes:
+                df_train_align = apply_auto_fixes_for_inference(df, auto_fixes)
+                train_columns_for_alignment = list(df_train_align.columns)
+            else:
+                train_columns_for_alignment = list(df.columns)
+        except Exception:
+            train_columns_for_alignment = list(df.columns)
+
+        # 6.4) feature importance, если смогли обучить pipeline
         if pipeline is not None:
             try:
                 feature_importance = extract_feature_importance(pipeline)
             except Exception:
                 feature_importance = []
 
-        # 6.2) код-подсказки под проблемы
+        # 6.5) код-подсказки под проблемы
         try:
             code_hints = build_code_hints(problems, task)
         except Exception:
@@ -548,8 +573,9 @@ async def upload_dataset(
             "code_hints": code_hints,
             "experiment_plan": experiment_plan,
             "target_suggestions": target_suggestions,
-            "columns": list(df.columns),
+            "columns": train_columns_for_alignment,  # 👈 колонки после авто-фиксов
             "sampling": sampling_info,
+            "auto_fixes": auto_fixes,               # 👈 сохраняем авто-фиксы
         }
         if pipeline is not None:
             PIPELINES[run_id] = pipeline
@@ -599,6 +625,7 @@ async def upload_dataset(
             },
         )
 
+
 # ---------------------------
 # Inference
 # ---------------------------
@@ -627,16 +654,23 @@ async def predict_on_run(
 
         task = RUNS[run_id]["task"]
         train_cols: List[str] = RUNS[run_id]["columns"]
+        auto_fixes: Optional[Dict[str, Any]] = RUNS[run_id].get("auto_fixes")
         target = task.get("target")
         task_type = task.get("task")
 
-        # y_true (если есть)
+        # y_true (если есть в файле)
         y_true = None
         if target and target in df_new.columns:
             y_true = df_new[target].copy()
 
-        # выравниваем признаки
-        X_inf = align_features_for_inference(df_new, train_cols, target)
+        # применяем те же авто-фиксы, что и при обучении
+        if auto_fixes:
+            df_new_fixed = apply_auto_fixes_for_inference(df_new, auto_fixes)
+        else:
+            df_new_fixed = df_new
+
+        # выравниваем признаки по тренировочным колонкам
+        X_inf = align_features_for_inference(df_new_fixed, train_cols, target)
         pipe = PIPELINES[run_id]
 
         # предсказания
@@ -669,7 +703,7 @@ async def predict_on_run(
             except Exception:
                 metrics_out = None
 
-        # превью
+        # превью (первые return_rows строк)
         preview = pd.DataFrame({"prediction": y_pred_list})
         if proba_list is not None:
             preview["proba"] = proba_list
@@ -696,7 +730,6 @@ async def predict_on_run(
         raise HTTPException(status_code=400, detail={"error": "bad_file", "details": str(e)})
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": "predict_failed", "details": str(e)})
-
 
 # ---------------------------
 # Runs utils

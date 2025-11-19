@@ -28,6 +28,14 @@ from sklearn.metrics import (
     average_precision_score,
 )
 
+# Optional: oversampling для борьбы с сильным дисбалансом классов
+try:
+    from imblearn.over_sampling import RandomOverSampler  # type: ignore
+    IMB_AVAILABLE = True
+except Exception:
+    RandomOverSampler = None  # type: ignore
+    IMB_AVAILABLE = False
+
 import joblib
 
 import matplotlib
@@ -304,6 +312,7 @@ def train_baseline(
     Обучаем RandomForest (классификация/регрессия) с учётом:
     - class_weight при дисбалансе
     - дропа id-подобных и константных колонок
+    - авто-фиксов high-null фичей
     """
     try:
         if target not in df.columns:
@@ -312,22 +321,29 @@ def train_baseline(
         problems = problems or {}
 
         # 0. убираем строки без таргета
-        df = df[~df[target].isna()].copy()
-        if df.shape[0] < 20:
+        df_no_nan = df[~df[target].isna()].copy()
+        if df_no_nan.shape[0] < 20:
             return {"model_type": "skipped", "reason": "Мало строк после удаления NaN в таргете."}
+
+        # 0.1 авто-фиксы для high-null фичей
+        df_fixed, auto_fixes = apply_auto_fixes_for_training(
+            df_no_nan,
+            problems,
+            {"task": task, "target": target},
+        )
 
         # 1. что дропаем (id + константы)
         drop_cols: list[str] = []
         for c in problems.get("id_like", []) or []:
-            if c in df.columns and c != target:
+            if c in df_fixed.columns and c != target:
                 drop_cols.append(c)
         for c in problems.get("constant_features", []) or []:
-            if c in df.columns and c != target and c not in drop_cols:
+            if c in df_fixed.columns and c != target and c not in drop_cols:
                 drop_cols.append(c)
 
         # 2. X, y
-        X = df.drop(columns=[target] + drop_cols)
-        y = df[target]
+        X = df_fixed.drop(columns=[target] + drop_cols)
+        y = df_fixed[target]
 
         if X.shape[1] == 0:
             return {"model_type": "skipped", "reason": "После очистки не осталось признаков."}
@@ -360,8 +376,22 @@ def train_baseline(
                 stratify=y if can_stratify else None,
             )
 
+            # oversampling только для train, если дисбаланс тяжёлый и есть imblearn
+            oversampling_used = False
+            ci = problems.get("class_imbalance") or {}
+            severity = ci.get("severity")
+            X_fit, y_fit = X_train, y_train
+            if IMB_AVAILABLE and severity in ("heavy", "extreme"):
+                try:
+                    ros = RandomOverSampler(random_state=42)
+                    X_fit, y_fit = ros.fit_resample(X_train, y_train)
+                    oversampling_used = True
+                except Exception:
+                    oversampling_used = False
+
             pipe = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
-            pipe.fit(X_train, y_train)
+            pipe.fit(X_fit, y_fit)
+
             preds = pipe.predict(X_val)
 
             acc = float(accuracy_score(y_val, preds))
@@ -375,6 +405,8 @@ def train_baseline(
                     "dropped_columns": drop_cols,
                     "used_class_weight": used_class_weight,
                     "stratified_split": bool(can_stratify),
+                    "oversampling_used": oversampling_used,
+                    "auto_fixes": auto_fixes,
                 },
             }
 
@@ -411,6 +443,7 @@ def train_baseline(
                     "dropped_columns": drop_cols,
                     "used_class_weight": False,
                     "stratified_split": False,
+                    "auto_fixes": auto_fixes,
                 },
             }
 
@@ -446,6 +479,9 @@ def auto_model_search(
         * для регрессии — RMSE (со знаком минус)
         * для классификации — f1_weighted
           или PR-AUC, если есть дисбаланс и 2 класса
+
+    Добавлено:
+    - авто-фиксы high-null фичей через apply_auto_fixes_for_training
     """
     problems = problems or {}
     task_type = task.get("task")
@@ -466,17 +502,24 @@ def auto_model_search(
             "pipeline": None,
         }
 
+    # 0.1 авто-фиксы для high-null фичей
+    df_fixed, auto_fixes = apply_auto_fixes_for_training(
+        df_clean,
+        problems,
+        task,
+    )
+
     # 1. дропаем id-подобные и константы
     drop_cols: list[str] = []
     for c in problems.get("id_like", []) or []:
-        if c in df_clean.columns and c != target:
+        if c in df_fixed.columns and c != target:
             drop_cols.append(c)
     for c in problems.get("constant_features", []) or []:
-        if c in df_clean.columns and c != target and c not in drop_cols:
+        if c in df_fixed.columns and c != target and c not in drop_cols:
             drop_cols.append(c)
 
-    X = df_clean.drop(columns=[target] + drop_cols)
-    y = df_clean[target]
+    X = df_fixed.drop(columns=[target] + drop_cols)
+    y = df_fixed[target]
 
     if X.shape[1] == 0:
         return {
@@ -588,7 +631,7 @@ def auto_model_search(
                 {
                     "name": "RandomForestRegressor",
                     "estimator": RandomForestRegressor(
-                        n_estimators=200, random_state=42, 
+                        n_estimators=200, random_state=42,
                     ),
                 },
                 {
@@ -764,6 +807,7 @@ def auto_model_search(
             task_type == "classification" and problems.get("class_imbalance")
         ),
         "primary_metric": primary_metric_name,
+        "auto_fixes": auto_fixes,
     }
 
     if not return_pipeline:
@@ -1306,6 +1350,117 @@ def build_experiment_plan(
     )
 
     return plan
+
+
+# ---------------------------------------------------------------------
+# 6.3 Авто-фиксы «сделать сейчас» для данных (high-null фичи)
+# ---------------------------------------------------------------------
+def apply_auto_fixes_for_training(
+    df: pd.DataFrame,
+    problems: dict,
+    task: dict | None = None,
+    high_null_threshold: float = 30.0,
+    drop_threshold: float = 80.0,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Минимальные автоматические правки перед обучением модели.
+
+    Сейчас делаем одну вещь из блока «🔥 Сделать сейчас»:
+    - для колонок с > high_null_threshold процентов пропусков
+      (из problems['high_null_features']):
+        * если пропусков > drop_threshold → дропаём колонку;
+        * иначе добавляем бинарный флаг is_<col>_missing (0/1).
+
+    Сами значения не заполняем — ими займётся SimpleImputer
+    внутри ColumnTransformer. Возвращаем (df_fixed, meta) с описанием фиксов.
+    """
+    task = task or {}
+    df_fixed = df.copy()
+    fixes_meta: dict[str, dict] = {}
+
+    high_null = problems.get("high_null_features") or {}
+    if not high_null:
+        return df_fixed, fixes_meta
+
+    drop_cols: list[str] = []
+    flag_cols: list[str] = []
+
+    target = task.get("target")
+
+    for col, perc in high_null.items():
+        if col not in df_fixed.columns:
+            continue
+        if target and col == target:
+            # таргет не трогаем
+            continue
+
+        perc = float(perc)
+        if perc >= float(drop_threshold):
+            # очень дырявые фичи (>80% NaN) — просто выкидываем
+            drop_cols.append(col)
+        elif perc >= float(high_null_threshold):
+            # флаг is_<col>_missing
+            flag_name = f"is_{col}_missing"
+            if flag_name not in df_fixed.columns:
+                df_fixed[flag_name] = df_fixed[col].isna().astype("int8")
+                flag_cols.append(flag_name)
+
+    if drop_cols:
+        df_fixed = df_fixed.drop(columns=drop_cols)
+
+    fixes_meta["high_null"] = {
+        "drop": drop_cols,
+        "flag": flag_cols,
+        "stats": {c: float(p) for c, p in high_null.items()},
+        "high_null_threshold": float(high_null_threshold),
+        "drop_threshold": float(drop_threshold),
+    }
+
+    return df_fixed, fixes_meta
+
+
+def apply_auto_fixes_for_inference(
+    df: pd.DataFrame,
+    auto_fixes: dict | None,
+) -> pd.DataFrame:
+    """
+    Применяем те же авто-фиксы, что и на обучении, к новому датасету
+    перед инференсом.
+
+    Здесь мы ничего не пересчитываем по-новой, а просто повторяем
+    решения, сохранённые в auto_fixes.
+    """
+    if not auto_fixes:
+        return df
+
+    df_fixed = df.copy()
+
+    high_null_cfg = auto_fixes.get("high_null") or {}
+    drop_cols = high_null_cfg.get("drop") or []
+    flag_names = high_null_cfg.get("flag") or []
+
+    # 1) дропаём те же самые колонки, что и на обучении (если они есть)
+    existing_drop = [c for c in drop_cols if c in df_fixed.columns]
+    if existing_drop:
+        df_fixed = df_fixed.drop(columns=existing_drop)
+
+    # 2) создаём такие же флаги is_<col>_missing
+    for flag_name in flag_names:
+        if flag_name in df_fixed.columns:
+            continue
+
+        # восстановим исходное имя колонки из шаблона is_<col>_missing
+        col = flag_name
+        if flag_name.startswith("is_") and flag_name.endswith("_missing"):
+            col = flag_name[len("is_") : -len("_missing")]
+
+        if col in df_fixed.columns:
+            df_fixed[flag_name] = df_fixed[col].isna().astype("int8")
+        else:
+            # если исходной колонки уже нет — флаг просто из нулей
+            df_fixed[flag_name] = 0
+
+    return df_fixed
 
 
 # ---------------------------------------------------------------------
