@@ -244,7 +244,7 @@ def build_llm_context(run: Dict[str, Any]) -> str:
     if not model:
         parts.append("Модель не обучалась или не вернулась.")
     elif model.get("model_type") == "skipped":
-        parts.append(f"Модель пропущена: {model.get('reason')}")
+        parts.append(f"Тип модели: {model.get('model_type')}")
     else:
         parts.append(f"Тип модели: {model.get("model_type")}")
         if "accuracy" in model:
