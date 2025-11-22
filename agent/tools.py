@@ -1597,11 +1597,25 @@ def make_plots_base64(df: pd.DataFrame) -> list[dict]:
 # ---------------------------------------------------------------------
 # 9. сохранение run на диск (опционально)
 # ---------------------------------------------------------------------
-def save_run(run_data: dict, model_pipeline) -> str:
-    run_id = str(uuid.uuid4())
+# ---------------------------------------------------------------------
+# 9. сохранение run на диск (опционально)
+# ---------------------------------------------------------------------
+def save_run(run_data: dict, model_pipeline, run_id: str | None = None) -> str:
+    """
+    Сохраняем один запуск на диск:
+    - JSON с полным run_data
+    - model.joblib с pipeline (если он есть)
+
+    Если run_id не задан — генерируем новый UUID.
+    Возвращаем итоговый run_id.
+    """
+    if run_id is None:
+        run_id = str(uuid.uuid4())
+
     run_dir = os.path.join("runs", run_id)
     os.makedirs(run_dir, exist_ok=True)
 
+    # сохраняем весь run_data, а не только текстовый отчёт
     with open(os.path.join(run_dir, "report.json"), "w", encoding="utf-8") as f:
         json.dump(run_data, f, ensure_ascii=False, indent=2)
 
@@ -1609,6 +1623,7 @@ def save_run(run_data: dict, model_pipeline) -> str:
         joblib.dump(model_pipeline, os.path.join(run_dir, "model.joblib"))
 
     return run_id
+
 
 
 # ---------------------------------------------------------------------

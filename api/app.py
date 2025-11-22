@@ -12,7 +12,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, FileResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
-
+import json
+import joblib
 from agent.tools import (
     basic_eda,
     detect_task,
@@ -36,6 +37,7 @@ from agent.tools import (
     # НОВОЕ: авто-фиксы
     apply_auto_fixes_for_training,
     apply_auto_fixes_for_inference,
+    save_run,
 )
 
 # ---------------------------
