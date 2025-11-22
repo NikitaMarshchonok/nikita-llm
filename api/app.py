@@ -34,7 +34,7 @@ from agent.tools import (
     build_experiment_plan,
     auto_model_search,
     suggest_targets,
-    # НОВОЕ: авто-фиксы
+    # авто-фиксы + сохранение run'ов
     apply_auto_fixes_for_training,
     apply_auto_fixes_for_inference,
     save_run,
@@ -63,6 +63,7 @@ PIPELINES: Dict[str, Any] = {}
 # Ограничение размера датасета для анализа/обучения
 MAX_ROWS: int = int(os.getenv("DS_AGENT_MAX_ROWS", "25000"))
 
+# Папка для сохранения run'ов
 RUNS_DIR = os.path.join("runs")
 
 
@@ -269,15 +270,20 @@ def build_llm_context(run: Dict[str, Any]) -> str:
     if target_summary and (target_summary.get("target") or target_summary.get("has_target")):
         parts.append("=== Таргет ===")
         parts.append(f"Имя таргета: {target_summary.get('target')}")
-        parts.append(f"Строк: {target_summary.get('n_rows')}, пропусков: {target_summary.get('n_missing')}")
+        parts.append(
+            f"Строк: {target_summary.get('n_rows')}, пропусков: {target_summary.get('n_missing')}"
+        )
         if target_summary.get("task") == "classification":
-            parts.append(f"Число классов: {target_summary.get("n_classes")}")
+            parts.append(f"Число классов: {target_summary.get('n_classes')}")
             top_classes = target_summary.get("top_classes") or []
             short = []
             for cls in top_classes[:5]:
                 label = cls.get("label")
                 share = cls.get("share")
-                short.append(f"{label} (~{share:.2f})")
+                if share is not None:
+                    short.append(f"{label} (~{share:.2f})")
+                else:
+                    short.append(str(label))
             if short:
                 parts.append("Топ классы: " + ", ".join(short))
         elif target_summary.get("task") == "regression":
@@ -297,7 +303,7 @@ def build_llm_context(run: Dict[str, Any]) -> str:
     elif model.get("model_type") == "skipped":
         parts.append(f"Тип модели: {model.get('model_type')}")
     else:
-        parts.append(f"Тип модели: {model.get("model_type")}")
+        parts.append(f"Тип модели: {model.get('model_type')}")
         if "accuracy" in model:
             parts.append(f"accuracy = {model['accuracy']:.4f}")
         if "f1" in model:
@@ -515,8 +521,6 @@ async def upload_dataset(
         feature_suggestions = auto_feature_suggestions(df)
 
         # === Шаг 1: авто-фиксы под "Сделать сейчас" ===
-        #  - high-null фичи: drop / флаг is_null
-        #  - возвращаем df_model (для обучения) и метаданные auto_fixes
         df_model, auto_fixes = apply_auto_fixes_for_training(
             df,
             problems=problems,
@@ -591,8 +595,7 @@ async def upload_dataset(
             column_roles=column_roles,
         )
 
-        # 12) сохраняем run
-                # 12) собираем структуру run
+        # 12) собираем структуру run
         run_id = f"run_{uuid4().hex[:8]}"
         run_record: Dict[str, Any] = {
             "run_id": run_id,
@@ -616,10 +619,10 @@ async def upload_dataset(
             "code_hints": code_hints,
             "experiment_plan": experiment_plan,
             "target_suggestions": target_suggestions,
-            "columns": list(df.columns),            # сырые колонки
-            "model_columns": list(df_model.columns),# колонки для модели
+            "columns": list(df.columns),             # сырые колонки
+            "model_columns": list(df_model.columns), # колонки для модели
             "sampling": sampling_info,
-            "auto_fixes": auto_fixes,               # метаданные авто-фиксов
+            "auto_fixes": auto_fixes,                # метаданные авто-фиксов
         }
 
         # 12.1) сохраняем run на диск (JSON + model.joblib)
@@ -657,6 +660,10 @@ async def upload_dataset(
         payload = {key: run_record.get(key) for key in payload_keys}
         return JSONResponse(content=jsonable_encoder(payload))
 
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"error": "bad_file", "details": str(e)})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"error": "upload_failed", "details": str(e)})
 
 
 # ---------------------------
@@ -781,14 +788,15 @@ async def predict_on_run(
 # ---------------------------
 @app.get("/runs/{run_id}")
 def get_run(run_id: str):
-    if run_id not in RUNS:
-        raise HTTPException(status_code=404, detail="run_id not found")
-    return RUNS[run_id]
+    run, _ = get_run_and_pipeline(run_id)
+    return run
 
 
 @app.get("/runs")
 def list_runs():
-    items = []
+    items: list[Dict[str, Any]] = []
+
+    # 1) run'ы из памяти
     for run_id, data in RUNS.items():
         items.append(
             {
@@ -798,14 +806,35 @@ def list_runs():
                 "has_model": data.get("model") is not None,
             }
         )
+
+    # 2) run'ы с диска (если сервис перезапускался)
+    if os.path.exists(RUNS_DIR):
+        for run_id in os.listdir(RUNS_DIR):
+            run_path = os.path.join(RUNS_DIR, run_id)
+            if not os.path.isdir(run_path):
+                continue
+            # пропускаем те, что уже есть в items
+            if any(it["run_id"] == run_id for it in items):
+                continue
+            run_data, _ = load_run_from_disk(run_id)
+            if run_data is None:
+                continue
+            items.append(
+                {
+                    "run_id": run_id,
+                    "filename": run_data.get("filename"),
+                    "task": run_data.get("task"),
+                    "has_model": run_data.get("model") is not None,
+                }
+            )
+
     return items
 
 
 @app.get("/runs/{run_id}/report")
 def get_run_report(run_id: str):
-    if run_id not in RUNS:
-        raise HTTPException(status_code=404, detail="run_id not found")
-    return RUNS[run_id]
+    run, _ = get_run_and_pipeline(run_id)
+    return run
 
 
 # ---------------------------
@@ -823,10 +852,8 @@ async def ask_agent(
     - формируем промпт и отправляем в call_llm,
     - возвращаем текстовый ответ.
     """
-    if run_id not in RUNS:
-        raise HTTPException(status_code=404, detail="run_id not found")
+    run, _ = get_run_and_pipeline(run_id)
 
-    run = RUNS[run_id]
     context_text = build_llm_context(run)
 
     prompt = (
@@ -855,10 +882,9 @@ async def ask_agent(
 # ---------------------------
 @app.get("/runs/{run_id}/download")
 def download_run_markdown(run_id: str):
-    if run_id not in RUNS:
-        raise HTTPException(status_code=404, detail="run_id not found")
+    run, _ = get_run_and_pipeline(run_id)
 
-    data = RUNS[run_id]
+    data = run
     lines = []
     lines.append(f"# Run {run_id}")
     if data.get("filename"):
