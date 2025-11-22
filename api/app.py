@@ -63,6 +63,55 @@ PIPELINES: Dict[str, Any] = {}
 # Ограничение размера датасета для анализа/обучения
 MAX_ROWS: int = int(os.getenv("DS_AGENT_MAX_ROWS", "25000"))
 
+RUNS_DIR = os.path.join("runs")
+
+
+def load_run_from_disk(run_id: str) -> tuple[Dict[str, Any] | None, Any | None]:
+    """
+    Пытаемся загрузить run с диска: runs/<run_id>/report.json (+ model.joblib).
+    Возвращаем (run_data, pipeline) или (None, None), если не нашли/не получилось.
+    """
+    run_dir = os.path.join(RUNS_DIR, run_id)
+    report_path = os.path.join(run_dir, "report.json")
+    if not os.path.exists(report_path):
+        return None, None
+
+    try:
+        with open(report_path, "r", encoding="utf-8") as f:
+            run_data: Dict[str, Any] = json.load(f)
+    except Exception:
+        return None, None
+
+    model_path = os.path.join(run_dir, "model.joblib")
+    pipeline = None
+    if os.path.exists(model_path):
+        try:
+            pipeline = joblib.load(model_path)
+        except Exception:
+            pipeline = None
+
+    run_data.setdefault("run_id", run_id)
+    return run_data, pipeline
+
+
+def get_run_and_pipeline(run_id: str) -> tuple[Dict[str, Any], Any | None]:
+    """
+    Берём run из памяти или подгружаем с диска при первом обращении.
+    Если run нет ни в памяти, ни на диске — кидаем 404.
+    """
+    if run_id in RUNS:
+        return RUNS[run_id], PIPELINES.get(run_id)
+
+    run_data, pipeline = load_run_from_disk(run_id)
+    if run_data is None:
+        raise HTTPException(status_code=404, detail="run_id not found")
+
+    RUNS[run_id] = run_data
+    if pipeline is not None:
+        PIPELINES[run_id] = pipeline
+
+    return run_data, pipeline
+
 
 # ---------------------------
 # Utils: чтение файлов
@@ -543,8 +592,9 @@ async def upload_dataset(
         )
 
         # 12) сохраняем run
+                # 12) собираем структуру run
         run_id = f"run_{uuid4().hex[:8]}"
-        RUNS[run_id] = {
+        run_record: Dict[str, Any] = {
             "run_id": run_id,
             "filename": file.filename,
             "eda": eda,
@@ -566,11 +616,17 @@ async def upload_dataset(
             "code_hints": code_hints,
             "experiment_plan": experiment_plan,
             "target_suggestions": target_suggestions,
-            "columns": list(df.columns),           # колонки "сырых" данных
-            "model_columns": list(df_model.columns),  # колонки, по которым реально училась модель
+            "columns": list(df.columns),            # сырые колонки
+            "model_columns": list(df_model.columns),# колонки для модели
             "sampling": sampling_info,
-            "auto_fixes": auto_fixes,              # метаданные авто-фиксов
+            "auto_fixes": auto_fixes,               # метаданные авто-фиксов
         }
+
+        # 12.1) сохраняем run на диск (JSON + model.joblib)
+        save_run(run_record, pipeline, run_id=run_id)
+
+        # 12.2) кладём в память для быстрого доступа
+        RUNS[run_id] = run_record
         if pipeline is not None:
             PIPELINES[run_id] = pipeline
 
@@ -596,29 +652,11 @@ async def upload_dataset(
             "code_hints",
             "target_suggestions",
             "sampling",
-            "auto_fixes",   # отдадим и на фронт (для дебага)
+            "auto_fixes",
         ]
-        payload = {key: RUNS[run_id].get(key) for key in payload_keys}
+        payload = {key: run_record.get(key) for key in payload_keys}
         return JSONResponse(content=jsonable_encoder(payload))
 
-    except ValueError as e:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "failed_to_process_file",
-                "details": str(e),
-                "hint": "проверь разделитель (',' или ';'), названия колонок и target",
-            },
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "failed_to_process_file",
-                "details": str(e),
-                "hint": "проверь файл и target",
-            },
-        )
 
 
 # ---------------------------
@@ -634,12 +672,16 @@ async def predict_on_run(
     """Прогоняет новый файл через pipeline выбранного run_id.
     Если target в файле присутствует, вернём быстрые метрики по этому файлу.
     """
-    if run_id not in RUNS:
-        raise HTTPException(status_code=404, detail="run_id not found")
-    if run_id not in PIPELINES:
+    # ✅ Берём run и pipeline (из памяти или с диска)
+    run, pipeline = get_run_and_pipeline(run_id)
+
+    if pipeline is None:
         raise HTTPException(
             status_code=400,
-            detail={"error": "no_pipeline", "details": "Для этого run нет сохранённого pipeline. Переобучи /upload."},
+            detail={
+                "error": "no_pipeline",
+                "details": "Для этого run нет сохранённого pipeline. Переобучи /upload.",
+            },
         )
 
     try:
@@ -647,12 +689,11 @@ async def predict_on_run(
         df_new_raw = read_any_table(contents, file.filename)
         df_new_raw = normalize_columns(df_new_raw)
 
-        run = RUNS[run_id]
         task = run["task"]
         target = task.get("target")
         task_type = task.get("task")
 
-        # какие колонки ждёт модель
+        # какие колонки ждёт модель (те, на которых она реально училась)
         train_cols: List[str] = run.get("model_columns") or run.get("columns")
 
         # авто-фиксы, которые применялись при обучении
@@ -661,14 +702,16 @@ async def predict_on_run(
         # применяем те же авто-фиксы к новому датасету
         df_new_model = apply_auto_fixes_for_inference(df_new_raw, auto_fixes)
 
-        # y_true (если есть)
+        # y_true (если есть таргет в новом файле)
         y_true = None
         if target and target in df_new_model.columns:
             y_true = df_new_model[target].copy()
 
-        # выравниваем признаки
+        # выравниваем признаки под train-колонки
         X_inf = align_features_for_inference(df_new_model, train_cols, target)
-        pipe = PIPELINES[run_id]
+
+        # ✅ используем pipeline, который вернул helper
+        pipe = pipeline
 
         # предсказания
         y_pred = pipe.predict(X_inf)
@@ -686,7 +729,13 @@ async def predict_on_run(
         metrics_out = None
         if y_true is not None:
             try:
-                from sklearn.metrics import accuracy_score, f1_score, r2_score, mean_squared_error, mean_absolute_error
+                from sklearn.metrics import (
+                    accuracy_score,
+                    f1_score,
+                    r2_score,
+                    mean_squared_error,
+                    mean_absolute_error,
+                )
 
                 if task_type == "classification":
                     acc = float(accuracy_score(y_true, y_pred))
