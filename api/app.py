@@ -33,6 +33,8 @@ from agent.tools import (
     build_experiment_plan,
     auto_model_search,
     suggest_targets,
+    # НОВОЕ: авто-фиксы
+    apply_auto_fixes_for_training,
     apply_auto_fixes_for_inference,
 )
 
@@ -218,7 +220,7 @@ def build_llm_context(run: Dict[str, Any]) -> str:
         parts.append(f"Имя таргета: {target_summary.get('target')}")
         parts.append(f"Строк: {target_summary.get('n_rows')}, пропусков: {target_summary.get('n_missing')}")
         if target_summary.get("task") == "classification":
-            parts.append(f"Число классов: {target_summary.get('n_classes')}")
+            parts.append(f"Число классов: {target_summary.get("n_classes")}")
             top_classes = target_summary.get("top_classes") or []
             short = []
             for cls in top_classes[:5]:
@@ -244,7 +246,7 @@ def build_llm_context(run: Dict[str, Any]) -> str:
     elif model.get("model_type") == "skipped":
         parts.append(f"Модель пропущена: {model.get('reason')}")
     else:
-        parts.append(f"Тип модели: {model.get('model_type')}")
+        parts.append(f"Тип модели: {model.get("model_type")}")
         if "accuracy" in model:
             parts.append(f"accuracy = {model['accuracy']:.4f}")
         if "f1" in model:
@@ -386,18 +388,18 @@ async def upload_dataset(
         contents = await file.read()
 
         # 1) читаем и нормализуем
-        df = read_any_table(contents, file.filename)
-        df = normalize_columns(df)
+        df_raw = read_any_table(contents, file.filename)
+        df_raw = normalize_columns(df_raw)
 
-        # 1.1) ограничение по размеру датасета
-        original_rows = int(len(df))
+        # 1.1) ограничение по размеру датасета (по сэмплу делаем EDA и обучение)
+        original_rows = int(len(df_raw))
         sampling_info: Dict[str, Any] = {
             "applied": False,
             "original_rows": original_rows,
             "used_rows": original_rows,
         }
         if original_rows > MAX_ROWS:
-            df = df.sample(n=MAX_ROWS, random_state=42).reset_index(drop=True)
+            df = df_raw.sample(n=MAX_ROWS, random_state=42).reset_index(drop=True)
             sampling_info.update(
                 {
                     "applied": True,
@@ -410,6 +412,8 @@ async def upload_dataset(
                     ),
                 }
             )
+        else:
+            df = df_raw.copy()
 
         # 2) нормализуем target; пустую строку считаем отсутствующим
         if target is not None:
@@ -459,18 +463,26 @@ async def upload_dataset(
         # 5.4) идеи фич
         feature_suggestions = auto_feature_suggestions(df)
 
-        # 6) авто-поиск лучшей модели + авто-фиксы
+        # === Шаг 1: авто-фиксы под "Сделать сейчас" ===
+        #  - high-null фичи: drop / флаг is_null
+        #  - возвращаем df_model (для обучения) и метаданные auto_fixes
+        df_model, auto_fixes = apply_auto_fixes_for_training(
+            df,
+            problems=problems,
+            task=task,
+            high_null_threshold=30.0,
+            drop_threshold=80.0,
+        )
+
+        # 6) авто-поиск лучшей модели (уже на df_model)
         model_res: Optional[Dict[str, Any]] = None
         pipeline = None
         model_leaderboard: Optional[list] = None
         feature_importance: List[Dict[str, Any]] = []
-        auto_fixes: Optional[Dict[str, Any]] = None
-        train_columns_for_alignment: List[str] = list(df.columns)
 
         if task["task"] != "eda" and task.get("target"):
-            # 6.1 auto_model_search
             try:
-                auto_res = auto_model_search(df, task, problems)
+                auto_res = auto_model_search(df_model, task, problems)
             except Exception:
                 auto_res = None
 
@@ -479,16 +491,10 @@ async def upload_dataset(
                 pipeline = auto_res.get("pipeline")
                 model_leaderboard = auto_res.get("leaderboard")
 
-                # достаём auto_fixes из training_log
-                training_log = (model_res or {}).get("training_log") or {}
-                af = training_log.get("auto_fixes")
-                if isinstance(af, dict):
-                    auto_fixes = af
-
-            # 6.2 fallback: train_baseline, если auto_model_search не сработал
+            # fallback: если всё упало — старый train_baseline
             if model_res is None or model_res.get("model_type") == "skipped":
                 baseline = train_baseline(
-                    df,
+                    df_model,
                     task["target"],
                     task["task"],
                     problems=problems,
@@ -499,35 +505,20 @@ async def upload_dataset(
                         pipeline = baseline.pop("pipeline")
                     model_res = baseline
 
-                    training_log = (model_res or {}).get("training_log") or {}
-                    af = training_log.get("auto_fixes")
-                    if isinstance(af, dict):
-                        auto_fixes = af
-
-        # 6.3) вычисляем тренировочные колонки с учётом авто-фиксов
-        try:
-            if auto_fixes:
-                df_train_align = apply_auto_fixes_for_inference(df, auto_fixes)
-                train_columns_for_alignment = list(df_train_align.columns)
-            else:
-                train_columns_for_alignment = list(df.columns)
-        except Exception:
-            train_columns_for_alignment = list(df.columns)
-
-        # 6.4) feature importance, если смогли обучить pipeline
+        # 6.1) feature importance, если смогли обучить pipeline
         if pipeline is not None:
             try:
                 feature_importance = extract_feature_importance(pipeline)
             except Exception:
                 feature_importance = []
 
-        # 6.5) код-подсказки под проблемы
+        # 6.2) код-подсказки под проблемы
         try:
             code_hints = build_code_hints(problems, task)
         except Exception:
             code_hints = []
 
-        # 7) текстовый отчёт
+        # 7) текстовый отчёт (по исходному df, чтобы описывать "сырые" данные)
         report_text = build_report(df, eda, task, model_res, problems)
 
         # 8) графики
@@ -573,9 +564,10 @@ async def upload_dataset(
             "code_hints": code_hints,
             "experiment_plan": experiment_plan,
             "target_suggestions": target_suggestions,
-            "columns": train_columns_for_alignment,  # 👈 колонки после авто-фиксов
+            "columns": list(df.columns),           # колонки "сырых" данных
+            "model_columns": list(df_model.columns),  # колонки, по которым реально училась модель
             "sampling": sampling_info,
-            "auto_fixes": auto_fixes,               # 👈 сохраняем авто-фиксы
+            "auto_fixes": auto_fixes,              # метаданные авто-фиксов
         }
         if pipeline is not None:
             PIPELINES[run_id] = pipeline
@@ -602,6 +594,7 @@ async def upload_dataset(
             "code_hints",
             "target_suggestions",
             "sampling",
+            "auto_fixes",   # отдадим и на фронт (для дебага)
         ]
         payload = {key: RUNS[run_id].get(key) for key in payload_keys}
         return JSONResponse(content=jsonable_encoder(payload))
@@ -649,28 +642,30 @@ async def predict_on_run(
 
     try:
         contents = await file.read()
-        df_new = read_any_table(contents, file.filename)
-        df_new = normalize_columns(df_new)
+        df_new_raw = read_any_table(contents, file.filename)
+        df_new_raw = normalize_columns(df_new_raw)
 
-        task = RUNS[run_id]["task"]
-        train_cols: List[str] = RUNS[run_id]["columns"]
-        auto_fixes: Optional[Dict[str, Any]] = RUNS[run_id].get("auto_fixes")
+        run = RUNS[run_id]
+        task = run["task"]
         target = task.get("target")
         task_type = task.get("task")
 
-        # y_true (если есть в файле)
+        # какие колонки ждёт модель
+        train_cols: List[str] = run.get("model_columns") or run.get("columns")
+
+        # авто-фиксы, которые применялись при обучении
+        auto_fixes = run.get("auto_fixes")
+
+        # применяем те же авто-фиксы к новому датасету
+        df_new_model = apply_auto_fixes_for_inference(df_new_raw, auto_fixes)
+
+        # y_true (если есть)
         y_true = None
-        if target and target in df_new.columns:
-            y_true = df_new[target].copy()
+        if target and target in df_new_model.columns:
+            y_true = df_new_model[target].copy()
 
-        # применяем те же авто-фиксы, что и при обучении
-        if auto_fixes:
-            df_new_fixed = apply_auto_fixes_for_inference(df_new, auto_fixes)
-        else:
-            df_new_fixed = df_new
-
-        # выравниваем признаки по тренировочным колонкам
-        X_inf = align_features_for_inference(df_new_fixed, train_cols, target)
+        # выравниваем признаки
+        X_inf = align_features_for_inference(df_new_model, train_cols, target)
         pipe = PIPELINES[run_id]
 
         # предсказания
@@ -703,14 +698,12 @@ async def predict_on_run(
             except Exception:
                 metrics_out = None
 
-        # превью (первые return_rows строк)
-        preview = pd.DataFrame({"prediction": y_pred_list})
+        # превью — показываем сырые колонки + prediction (+ proba)
+        preview = df_new_raw.reset_index(drop=True).copy()
+        preview["prediction"] = y_pred_list
         if proba_list is not None:
             preview["proba"] = proba_list
-        preview_full = pd.concat(
-            [df_new.reset_index(drop=True), preview],
-            axis=1,
-        ).head(max(1, return_rows))
+        preview_full = preview.head(max(1, return_rows))
 
         return JSONResponse(
             content=jsonable_encoder(
@@ -730,6 +723,7 @@ async def predict_on_run(
         raise HTTPException(status_code=400, detail={"error": "bad_file", "details": str(e)})
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": "predict_failed", "details": str(e)})
+
 
 # ---------------------------
 # Runs utils
