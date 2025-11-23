@@ -1,6 +1,6 @@
 # api/app.py
 from __future__ import annotations
-
+from dotenv import load_dotenv
 import os
 from io import BytesIO
 from uuid import uuid4
@@ -39,7 +39,7 @@ from agent.tools import (
     apply_auto_fixes_for_inference,
     save_run,
 )
-
+load_dotenv()
 # ---------------------------
 # App init + CORS
 # ---------------------------
@@ -418,10 +418,13 @@ def call_llm(prompt: str) -> str:
         return _fallback(f"ошибка вызова API: {e}")
 
 
+# ---------------------------
+# LLM: Gemini + fallback
+# ---------------------------
 def call_gemini(prompt: str) -> str:
     """
-    Второй LLM-слой: комментарии через Google Gemini.
-    Используем отдельный ключ GEMINI_API_KEY и модель GEMINI_MODEL (по умолчанию gemini-1.5-flash).
+    Вызов Gemini (google-generativeai) с безопасным fallback.
+    Использует GEMINI_API_KEY и GEMINI_MODEL (по умолчанию gemini-2.5-flash).
     """
     def _fallback(reason: str) -> str:
         question_marker = "=== Вопрос пользователя ==="
@@ -432,16 +435,16 @@ def call_gemini(prompt: str) -> str:
 
         return (
             f"⚠️ Gemini пока не подключён или недоступен ({reason}).\n\n"
-            "Я всё равно могу подсказать как DS-комментатор:\n\n"
+            "Но вот как я бы подсказал как DS-комментатор:\n\n"
             f"Вопрос: {user_question}\n\n"
-            "• Смотри на качество данных (пропуски, кардинальность, дисбаланс).\n"
-            "• Проверь метрики модели и сравни с простыми бейзлайнами.\n"
-            "• Используй план экспериментов (now / next / later), чтобы пошагово "
-            "улучшать модель и подготовить красивый отчёт.\n"
+            "• Проверь качество данных (пропуски, кардинальность, дисбаланс).\n"
+            "• Сравни текущую модель с простым бейзлайном.\n"
+            "• Используй план экспериментов (now / next / later), чтобы шаг за шагом "
+            "улучшать качество и готовить отчёт.\n"
         )
 
     api_key = os.getenv("GEMINI_API_KEY")
-    model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     if not api_key:
         return _fallback("нет переменной окружения GEMINI_API_KEY")
@@ -454,16 +457,9 @@ def call_gemini(prompt: str) -> str:
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
-        resp = model.generate_content(
-            [
-                "Ты выступаешь как опытный ML-комментатор. "
-                "У тебя есть отчёт по датасету, модель, список проблем и план экспериментов. "
-                "Комментируй коротко, по делу, без воды, давай 2–5 конкретных следующих шага.",
-                prompt,
-            ]
-        )
-        text = getattr(resp, "text", "") or ""
-        if not text.strip():
+        resp = model.generate_content(prompt)
+        text = getattr(resp, "text", None)
+        if not text:
             return _fallback("пустой ответ от Gemini")
         return text
     except Exception as e:
@@ -903,23 +899,29 @@ def get_run_report(run_id: str):
     return run
 
 
-# ---------------------------
+
 # LLM-слой: /ask
 # ---------------------------
 @app.post("/ask")
 async def ask_agent(
     run_id: str = Form(..., description="ID запуска (run_id), по которому спрашиваем"),
     question: str = Form(..., description="Вопрос к DS-агенту"),
+    engine: str = Form(
+        default="gemini",
+        description="LLM движок: 'gemini' или 'openai'",
+    ),
 ):
     """
     LLM-слой поверх DS-агента:
-    - по run_id вытаскиваем весь контекст (EDA, модель, проблемы, рекомендации),
+    - по run_id вытаскиваем контекст (EDA, модель, проблемы, рекомендации),
     - собираем текстовый контекст,
-    - формируем промпт и отправляем в call_llm,
-    - возвращаем текстовый ответ.
+    - формируем промпт,
+    - отправляем в выбранный движок (по умолчанию Gemini).
     """
-    run, _ = get_run_and_pipeline(run_id)
+    if run_id not in RUNS:
+        raise HTTPException(status_code=404, detail="run_id not found")
 
+    run = RUNS[run_id]
     context_text = build_llm_context(run)
 
     prompt = (
@@ -934,13 +936,18 @@ async def ask_agent(
         "Без лишней воды, дай 2–5 конкретных следующих шагов."
     )
 
-    answer = call_llm(prompt)
+    if engine == "openai":
+        answer = call_llm(prompt)
+    else:
+        answer = call_gemini(prompt)
 
     return {
         "run_id": run_id,
+        "engine": engine,
         "question": question,
         "answer": answer,
     }
+
 
 
 # ---------------------------
