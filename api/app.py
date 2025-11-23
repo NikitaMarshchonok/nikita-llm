@@ -418,6 +418,59 @@ def call_llm(prompt: str) -> str:
         return _fallback(f"ошибка вызова API: {e}")
 
 
+def call_gemini(prompt: str) -> str:
+    """
+    Второй LLM-слой: комментарии через Google Gemini.
+    Используем отдельный ключ GEMINI_API_KEY и модель GEMINI_MODEL (по умолчанию gemini-1.5-flash).
+    """
+    def _fallback(reason: str) -> str:
+        question_marker = "=== Вопрос пользователя ==="
+        if question_marker in prompt:
+            user_question = prompt.split(question_marker, 1)[1].strip()
+        else:
+            user_question = prompt.strip()
+
+        return (
+            f"⚠️ Gemini пока не подключён или недоступен ({reason}).\n\n"
+            "Я всё равно могу подсказать как DS-комментатор:\n\n"
+            f"Вопрос: {user_question}\n\n"
+            "• Смотри на качество данных (пропуски, кардинальность, дисбаланс).\n"
+            "• Проверь метрики модели и сравни с простыми бейзлайнами.\n"
+            "• Используй план экспериментов (now / next / later), чтобы пошагово "
+            "улучшать модель и подготовить красивый отчёт.\n"
+        )
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+
+    if not api_key:
+        return _fallback("нет переменной окружения GEMINI_API_KEY")
+
+    try:
+        import google.generativeai as genai  # type: ignore
+    except Exception:
+        return _fallback("библиотека google-generativeai не установлена (pip install -U google-generativeai)")
+
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        resp = model.generate_content(
+            [
+                "Ты выступаешь как опытный ML-комментатор. "
+                "У тебя есть отчёт по датасету, модель, список проблем и план экспериментов. "
+                "Комментируй коротко, по делу, без воды, давай 2–5 конкретных следующих шага.",
+                prompt,
+            ]
+        )
+        text = getattr(resp, "text", "") or ""
+        if not text.strip():
+            return _fallback("пустой ответ от Gemini")
+        return text
+    except Exception as e:
+        return _fallback(f"ошибка вызова Gemini API: {e}")
+
+
+
 # ---------------------------
 # Static / health
 # ---------------------------
@@ -786,15 +839,21 @@ async def predict_on_run(
 # ---------------------------
 @app.get("/runs/{run_id}")
 def get_run(run_id: str):
+    """Возвращает сохранённый run (из памяти или с диска)."""
     run, _ = get_run_and_pipeline(run_id)
     return run
 
 
 @app.get("/runs")
 def list_runs():
-    items: list[Dict[str, Any]] = []
+    """
+    Список запусков:
+    - сначала те, что уже есть в памяти,
+    - затем поднимаем то, что лежит в папке runs/ (если сервер перезапускался).
+    """
+    items: list[dict[str, Any]] = []
 
-    # 1) run'ы из памяти
+    # из памяти
     for run_id, data in RUNS.items():
         items.append(
             {
@@ -805,18 +864,18 @@ def list_runs():
             }
         )
 
-    # 2) run'ы с диска (если сервис перезапускался)
-    if os.path.exists(RUNS_DIR):
-        for run_id in os.listdir(RUNS_DIR):
-            run_path = os.path.join(RUNS_DIR, run_id)
-            if not os.path.isdir(run_path):
-                continue
-            # пропускаем те, что уже есть в items
+    # с диска
+    if os.path.isdir(RUNS_DIR):
+        for name in sorted(os.listdir(RUNS_DIR)):
+            run_id = name
+            # не дублируем то, что уже в памяти
             if any(it["run_id"] == run_id for it in items):
                 continue
+
             run_data, _ = load_run_from_disk(run_id)
-            if run_data is None:
+            if not run_data:
                 continue
+
             items.append(
                 {
                     "run_id": run_id,
@@ -828,6 +887,15 @@ def list_runs():
 
     return items
 
+
+@app.get("/runs/{run_id}/report")
+def get_run_report(run_id: str):
+    """
+    Возвращает полный run (тот же, что /runs/{run_id}),
+    оставлено для совместимости.
+    """
+    run, _ = get_run_and_pipeline(run_id)
+    return run
 
 @app.get("/runs/{run_id}/report")
 def get_run_report(run_id: str):
@@ -880,181 +948,201 @@ async def ask_agent(
 # ---------------------------
 @app.get("/runs/{run_id}/download")
 def download_run_markdown(run_id: str):
-    # Берём run (из памяти или подгружаем с диска)
+    """
+    Генерирует человекочитаемый Markdown-отчёт по одному run:
+    данные, задача, здоровье, модель, метрики, проблемы,
+    рекомендации, план экспериментов, идеи фич и подсказки по коду.
+    """
     run, _ = get_run_and_pipeline(run_id)
+
+    eda = run.get("eda") or {}
+    task = run.get("task") or {}
+    dataset_health = run.get("dataset_health") or {}
+    model = run.get("model") or {}
+    sampling = run.get("sampling") or {}
+    problem_list = run.get("problem_list") or []
+    recommendations = run.get("recommendations") or []
+    experiment_plan = run.get("experiment_plan") or []
+    feature_suggestions = run.get("feature_suggestions") or []
+    code_hints = run.get("code_hints") or []
+    target_summary = run.get("target_summary") or {}
+    status = run.get("status") or {}
+    next_actions = run.get("next_actions") or []
 
     lines: list[str] = []
 
     # Заголовок
-    lines.append(f"# Nikita DS Agent — Run `{run_id}`")
+    lines.append(f"# DS-отчёт по запуску `{run_id}`")
     filename = run.get("filename")
     if filename:
         lines.append(f"**Файл:** `{filename}`")
-    lines.append("")
 
-    # 1. Задача
-    task = run.get("task") or {}
-    lines.append("## 1. Задача")
-    lines.append(f"- Тип задачи: **{task.get('task')}**")
-    lines.append(f"- Target: `{task.get('target')}`")
-    lines.append("")
-
-    # 2. Датасет
-    eda = run.get("eda") or {}
-    sampling = run.get("sampling") or {}
     shape = eda.get("shape")
-
-    lines.append("## 2. Датасет")
     if shape and len(shape) == 2:
-        lines.append(f"- Размер: **{shape[0]}** строк × **{shape[1]}** колонок")
+        n_rows, n_cols = shape
+        lines.append(f"**Размер таблицы:** {n_rows} строк × {n_cols} колонок.")
+
     if sampling.get("applied"):
         lines.append(
-            f"- Для анализа использовано: **{sampling.get('used_rows')}** строк "
-            f"(из {sampling.get('original_rows')}) — random sample (random_state=42)."
+            f"**Сэмплирование:** использовано {sampling.get('used_rows')} строк "
+            f"из {sampling.get('original_rows')} (стратегия: {sampling.get('strategy')})."
         )
-    else:
-        if sampling.get("used_rows") and sampling.get("original_rows"):
-            lines.append(
-                f"- Использован весь датасет: **{sampling.get('used_rows')}** строк."
-            )
     lines.append("")
 
-    # 3. Здоровье датасета
-    dataset_health = run.get("dataset_health") or {}
-    if dataset_health:
-        lines.append("## 3. Здоровье датасета")
-        score = dataset_health.get("score")
-        level = dataset_health.get("level")
-        if score is not None:
-            lines.append(f"- Оценка: **{score}/100** ({level})")
-        reasons = dataset_health.get("reasons") or []
-        if reasons:
-            lines.append("- Основные факторы:")
-            for r in reasons:
-                lines.append(f"  - {r}")
-        lines.append("")
+    # 1. Задача и таргет
+    lines.append("## 1. Задача и таргет")
+    task_type = task.get("task")
+    target = task.get("target")
+    lines.append(f"- Тип задачи: `{task_type}`")
+    lines.append(f"- Таргет: `{target}`")
+    lines.append("")
 
-    # 4. Таргет
-    ts = run.get("target_summary") or {}
-    if ts.get("target") or ts.get("has_target"):
-        lines.append("## 4. Таргет")
-        lines.append(f"- Имя: `{ts.get('target')}`")
-        if ts.get("n_rows") is not None:
-            lines.append(
-                f"- Строк: {ts.get('n_rows')} | пропусков: {ts.get('n_missing')}"
-            )
-
-        if ts.get("task") == "classification":
-            if ts.get("n_classes") is not None:
-                lines.append(f"- Количество классов: {ts.get('n_classes')}")
-            top_classes = ts.get("top_classes") or []
+    # Краткая сводка по таргету
+    if target_summary.get("target") or target_summary.get("has_target"):
+        lines.append("### 1.1. Сводка по таргету")
+        lines.append(
+            f"- Строк: {target_summary.get('n_rows')}, "
+            f"пропусков: {target_summary.get('n_missing')}"
+        )
+        if target_summary.get("task") == "classification":
+            lines.append(f"- Число классов: {target_summary.get('n_classes')}")
+            top_classes = target_summary.get("top_classes") or []
             if top_classes:
-                lines.append("")
-                lines.append("| Класс | Доля | Кол-во |")
-                lines.append("|-------|------|--------|")
-                for cls in top_classes[:10]:
+                lines.append("- Топ классы:")
+                for cls in top_classes[:5]:
                     label = cls.get("label")
                     share = cls.get("share")
-                    count = cls.get("count")
-                    try:
-                        share_str = f"{float(share):.3f}"
-                    except Exception:
-                        share_str = str(share)
-                    lines.append(f"| {label} | {share_str} | {count} |")
-        elif ts.get("task") == "regression":
+                    lines.append(f"  - {label}: ~{share:.2f}")
+        elif target_summary.get("task") == "regression":
             lines.append(
-                f"- Диапазон: {ts.get('min')} … {ts.get('max')}\n"
-                f"- Среднее: {ts.get('mean')}, std: {ts.get('std')}"
+                "- Статистика: "
+                f"min={target_summary.get('min')}, "
+                f"max={target_summary.get('max')}, "
+                f"mean={target_summary.get('mean')}, "
+                f"std={target_summary.get('std')}"
             )
         lines.append("")
 
-    # 5. Модель и метрики
-    model = run.get("model") or {}
-    if model:
-        lines.append("## 5. Модель и метрики")
-        lines.append(f"- Тип модели: **{model.get('model_type')}**")
+    # 2. Здоровье датасета
+    lines.append("## 2. Здоровье датасета")
+    score = dataset_health.get("score")
+    level = dataset_health.get("level")
+    if score is not None or level:
+        lines.append(f"- Оценка: {score}/100 · уровень: {level}")
+    reasons = dataset_health.get("reasons") or []
+    if reasons:
+        lines.append("- Основные проблемы:")
+        for r in reasons:
+            lines.append(f"  - {r}")
+    lines.append("")
 
-        metrics_map = [
-            ("accuracy", "Accuracy"),
-            ("f1", "F1-score"),
-            ("roc_auc", "ROC-AUC"),
-            ("rmse", "RMSE"),
-            ("mae", "MAE"),
-            ("r2", "R²"),
-        ]
-        for key, label in metrics_map:
-            if key in model and model[key] is not None:
-                try:
-                    val_str = f"{float(model[key]):.4f}"
-                except Exception:
-                    val_str = str(model[key])
-                lines.append(f"- {label}: **{val_str}**")
-        lines.append("")
+    # 3. Модель и метрики
+    lines.append("## 3. Модель и метрики")
+    if not model:
+        lines.append("- Модель не обучалась или не была сохранена.")
+    elif model.get("model_type") == "skipped":
+        lines.append("- Модель пропущена (model_type = `skipped`).")
+    else:
+        lines.append(f"- Тип модели: `{model.get('model_type')}`")
+        # Ключевые метрики
+        if task_type == "classification":
+            acc = model.get("accuracy")
+            f1m = model.get("f1")
+            roc_auc = model.get("roc_auc")
+            if acc is not None:
+                lines.append(f"- accuracy: {acc:.4f}")
+            if f1m is not None:
+                lines.append(f"- f1_macro: {f1m:.4f}")
+            if roc_auc is not None:
+                lines.append(f"- roc_auc: {roc_auc:.4f}")
+        elif task_type == "regression":
+            rmse = model.get("rmse")
+            mae = model.get("mae")
+            r2 = model.get("r2")
+            if rmse is not None:
+                lines.append(f"- RMSE: {rmse:.4f}")
+            if mae is not None:
+                lines.append(f"- MAE: {mae:.4f}")
+            if r2 is not None:
+                lines.append(f"- R²: {r2:.4f}")
+    lines.append("")
 
-    # 6. Топ важные признаки
-    fi = run.get("feature_importance") or []
-    if fi:
-        lines.append("## 6. Топ важные признаки")
-        lines.append("| # | Признак | Важность |")
-        lines.append("|---|---------|----------|")
-        for i, f in enumerate(fi[:15], start=1):
-            feat = f.get("feature")
-            imp = f.get("importance")
-            try:
-                imp_str = f"{float(imp):.4f}"
-            except Exception:
-                imp_str = str(imp)
-            lines.append(f"| {i} | {feat} | {imp_str} |")
-        lines.append("")
-
-    # 7. Ключевые проблемы
-    pl = run.get("problem_list") or []
-    if pl:
-        lines.append("## 7. Ключевые проблемы в данных")
-        for p in pl:
-            msg = p.get("message") or p.get("code") or p.get("key")
+    # 4. Проблемы в данных
+    lines.append("## 4. Ключевые проблемы в данных")
+    if problem_list:
+        for p in problem_list:
             sev = p.get("severity") or p.get("level")
+            msg = p.get("message") or p.get("code") or p.get("key")
             lines.append(f"- [{sev}] {msg}")
-        lines.append("")
+    else:
+        lines.append("- Явных проблем не найдено или они не были сохранены.")
+    lines.append("")
 
-    # 8. Рекомендации
-    recs = run.get("recommendations") or []
-    if recs:
-        lines.append("## 8. Рекомендации по улучшению")
-        for r in recs:
+    # 5. Рекомендации и следующие шаги
+    lines.append("## 5. Рекомендации")
+    if recommendations:
+        for r in recommendations:
             lines.append(f"- {r}")
+    else:
+        lines.append("- Рекомендации отсутствуют.")
+    lines.append("")
+
+    lines.append("## 6. Следующие шаги")
+    if next_actions:
+        for a in next_actions:
+            lines.append(f"- {a}")
+    else:
+        lines.append("- Следующие шаги не заданы.")
+    lines.append("")
+
+    # 6.1. Статус анализа (если есть)
+    if status:
+        lines.append("### 6.1. Статус анализа")
+        for k, v in status.items():
+            lines.append(f"- {k}: {v}")
         lines.append("")
 
-    # 9. Следующие шаги
-    na = run.get("next_actions") or []
-    if na:
-        lines.append("## 9. Следующие шаги")
-        for step in na:
-            lines.append(f"- {step}")
-        lines.append("")
-
-    # 10. План экспериментов
-    exp = run.get("experiment_plan") or []
-    if exp:
-        lines.append("## 10. План экспериментов (now / next / later)")
-        lines.append("| Priority | Шаг | Описание |")
-        lines.append("|----------|-----|----------|")
-        for st in exp:
+    # 7. План экспериментов
+    lines.append("## 7. План экспериментов (now / next / later)")
+    if experiment_plan:
+        for step in experiment_plan:
             lines.append(
-                f"| {st.get('priority')} | {st.get('title')} | {st.get('description')} |"
+                f"- [{step.get('priority')}] {step.get('title')}: "
+                f"{step.get('description')}"
             )
-        lines.append("")
+    else:
+        lines.append("- План экспериментов не сформирован.")
+    lines.append("")
 
-    # 11. Авто-фиксы
-    auto_fixes = run.get("auto_fixes")
-    if auto_fixes:
-        lines.append("## 11. Авто-фиксы, применённые при обучении")
-        if isinstance(auto_fixes, dict):
-            for key, val in auto_fixes.items():
-                lines.append(f"- **{key}**: {val}")
-        else:
-            lines.append(f"- {auto_fixes}")
-        lines.append("")
+    # 8. Идеи новых фич
+    lines.append("## 8. Идеи новых признаков")
+    if feature_suggestions:
+        for fs in feature_suggestions:
+            lines.append(f"- {fs}")
+    else:
+        lines.append("- Идей новых признаков нет или они не были сохранены.")
+    lines.append("")
+
+    # 9. Подсказки по коду
+    lines.append("## 9. Подсказки по коду и приёмы")
+    if code_hints:
+        for hint in code_hints:
+            title = hint.get("title") or "Сниппет"
+            desc = hint.get("description") or ""
+            code = (hint.get("code") or "").strip()
+
+            lines.append(f"### {title}")
+            if desc:
+                lines.append(desc)
+                lines.append("")
+            if code:
+                lines.append("```python")
+                lines.append(code)
+                lines.append("```")
+                lines.append("")
+    else:
+        lines.append("- Подсказки по коду не сформированы.")
+    lines.append("")
 
     md = "\n".join(lines)
     return PlainTextResponse(md)
