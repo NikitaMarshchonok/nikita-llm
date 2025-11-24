@@ -23,9 +23,11 @@ from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegress
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
-    mean_squared_error,
+    precision_score,
+    recall_score,
     roc_auc_score,
-    average_precision_score,
+    confusion_matrix,
+    RocCurveDisplay,
 )
 
 # Optional: oversampling для борьбы с сильным дисбалансом классов
@@ -41,6 +43,16 @@ import joblib
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+def fig_to_base64(fig) -> str:
+    """Преобразует matplotlib.figure.Figure в base64-строку PNG."""
+    buf = io.BytesIO()
+    fig.tight_layout()
+    fig.savefig(buf, format="png", dpi=110)
+    buf.seek(0)
+    img_bytes = buf.read()
+    plt.close(fig)
+    return base64.b64encode(img_bytes).decode("ascii")
 
 
 # ---------------------------------------------------------------------
@@ -313,6 +325,12 @@ def train_baseline(
     - class_weight при дисбалансе
     - дропа id-подобных и константных колонок
     - авто-фиксов high-null фичей
+
+    Для классификации дополнительно считаем:
+    - accuracy, f1 (weighted), precision, recall
+    - confusion matrix (как матрица чисел)
+    - ROC-AUC (для бинарной задачи)
+    - ML-графики (confusion matrix heatmap + ROC-кривая) в поле ml_plots
     """
     try:
         if target not in df.columns:
@@ -394,13 +412,87 @@ def train_baseline(
 
             preds = pipe.predict(X_val)
 
+            # --- базовые метрики ---
             acc = float(accuracy_score(y_val, preds))
             f1 = float(f1_score(y_val, preds, average="weighted"))
+            precision = float(
+                precision_score(y_val, preds, average="weighted", zero_division=0)
+            )
+            recall = float(
+                recall_score(y_val, preds, average="weighted", zero_division=0)
+            )
 
+            # --- confusion matrix (числа) ---
+            cm = confusion_matrix(y_val, preds)
+            cm_list = cm.tolist()
+
+            # --- confusion matrix heatmap (картинка) ---
+            cm_plot_b64 = None
+            try:
+                fig_cm, ax_cm = plt.subplots(figsize=(4, 3))
+                im = ax_cm.imshow(cm, cmap="Blues")
+                ax_cm.set_title("Confusion matrix")
+                ax_cm.set_xlabel("Predicted")
+                ax_cm.set_ylabel("True")
+
+                classes = list(np.unique(y_val))
+                ax_cm.set_xticks(range(len(classes)))
+                ax_cm.set_yticks(range(len(classes)))
+                ax_cm.set_xticklabels(classes, rotation=45, ha="right", fontsize=8)
+                ax_cm.set_yticklabels(classes, fontsize=8)
+
+                # подписи в ячейках
+                for i in range(cm.shape[0]):
+                    for j in range(cm.shape[1]):
+                        ax_cm.text(
+                            j,
+                            i,
+                            cm[i, j],
+                            ha="center",
+                            va="center",
+                            color="black",
+                            fontsize=7,
+                        )
+
+                cm_plot_b64 = fig_to_base64(fig_cm)
+            except Exception:
+                cm_plot_b64 = None
+
+            # --- ROC-AUC + ROC-кривая (для бинарной задачи) ---
+            roc_auc_val: float | None = None
+            roc_curve_plot_b64: str | None = None
+            if y_val.nunique() == 2 and hasattr(pipe, "predict_proba"):
+                try:
+                    proba = pipe.predict_proba(X_val)[:, 1]
+                    roc_auc_val = float(roc_auc_score(y_val, proba))
+                    fig_roc, ax_roc = plt.subplots(figsize=(4, 3))
+                    RocCurveDisplay.from_predictions(y_val, proba, ax=ax_roc)
+                    ax_roc.set_title("ROC curve")
+                    roc_curve_plot_b64 = fig_to_base64(fig_roc)
+                except Exception:
+                    roc_auc_val = None
+                    roc_curve_plot_b64 = None
+
+            # --- финальный JSON для модели ---
             res: dict = {
                 "model_type": "RandomForestClassifier",
+                "task": task,
+                "target": target,
+
+                # главная метрика для UI
+                "primary_metric_name": "F1 (weighted)",
+                "primary_metric_value": f1,
+
+                # базовые метрики
                 "accuracy": acc,
                 "f1": f1,
+                "precision": precision,
+                "recall": recall,
+                "roc_auc": roc_auc_val,
+
+                # confusion matrix в числовом виде
+                "confusion_matrix": cm_list,
+
                 "training_log": {
                     "dropped_columns": drop_cols,
                     "used_class_weight": used_class_weight,
@@ -410,13 +502,24 @@ def train_baseline(
                 },
             }
 
-            # бинарка → ROC-AUC
-            if y_val.nunique() == 2:
-                try:
-                    proba = pipe.predict_proba(X_val)[:, 1]
-                    res["roc_auc"] = float(roc_auc_score(y_val, proba))
-                except Exception:
-                    pass
+            # ML-графики, которые потом можно просто добавить в result["plots"]
+            ml_plots: list[dict] = []
+            if cm_plot_b64 is not None:
+                ml_plots.append(
+                    {
+                        "name": "Confusion matrix (model)",
+                        "image_base64": cm_plot_b64,
+                    }
+                )
+            if roc_curve_plot_b64 is not None:
+                ml_plots.append(
+                    {
+                        "name": "ROC curve (model)",
+                        "image_base64": roc_curve_plot_b64,
+                    }
+                )
+            if ml_plots:
+                res["ml_plots"] = ml_plots
 
             if return_model:
                 res["pipeline"] = pipe
@@ -457,6 +560,7 @@ def train_baseline(
 
     except Exception as e:
         return {"model_type": "skipped", "reason": f"Ошибка обучения: {e}"}
+
 
 
 # ---------------------------------------------------------------------

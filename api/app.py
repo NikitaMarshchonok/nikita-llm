@@ -306,7 +306,11 @@ def build_llm_context(run: Dict[str, Any]) -> str:
             parts.append(f"accuracy = {model['accuracy']:.4f}")
         if "f1" in model:
             parts.append(f"f1 = {model['f1']:.4f}")
-        if "roc_auc" in model:
+        if "precision" in model:
+            parts.append(f"precision = {model['precision']:.4f}")
+        if "recall" in model:
+            parts.append(f"recall = {model['recall']:.4f}")
+        if "roc_auc" in model and model.get("roc_auc") is not None:
             parts.append(f"roc_auc = {model['roc_auc']:.4f}")
         if "rmse" in model:
             parts.append(f"rmse = {model['rmse']:.4f}")
@@ -623,8 +627,16 @@ async def upload_dataset(
         # 7) текстовый отчёт (по исходному df, чтобы описывать "сырые" данные)
         report_text = build_report(df, eda, task, model_res, problems)
 
-        # 8) графики
+        # 8) графики по данным (EDA)
         plots = make_plots_base64(df)
+
+        # 8.1) ML-графики из модели (confusion matrix, ROC), если они есть
+        ml_plots = []
+        if model_res and isinstance(model_res, dict):
+            ml_plots = model_res.get("ml_plots") or []
+        if ml_plots:
+            plots.extend(ml_plots)
+
 
         # 9) рекомендации
         recs = build_recommendations(df, eda, task, problems, model_res)

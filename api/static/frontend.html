@@ -316,7 +316,7 @@
   </header>
 
   <main>
-    <!-- левая панель: загрузка -->
+    <!-- левая панель: загрузка + инференс -->
     <section class="left-panel">
       <h2 style="font-size:14px; margin:0 0 4px;">Загрузка датасета</h2>
       <p style="font-size:12px; color:var(--text-muted); margin:0 0 8px;">Файл с табличными данными + (опционально) имя таргета.</p>
@@ -330,9 +330,28 @@
       <button id="uploadBtn" onclick="uploadDataset()">Отправить</button>
       <div id="status" style="min-height:22px; margin-top:4px; font-size:12px;"></div>
       <small style="font-size:11px; color:var(--text-muted);">Файл отправляется на <code>/upload</code>, бэкенд делает EDA и базовую модель.</small>
+
+      <!-- ▼ Новый блок: инференс по сохранённой модели -->
+      <hr style="border:0; border-top:1px solid rgba(148,163,184,0.18); margin:10px 0 8px;">
+
+      <h3 style="font-size:13px; margin:0 0 4px;">Предсказания по модели</h3>
+      <p style="font-size:11px; color:var(--text-muted); margin:0 0 6px;">
+        1) Выбери run справа в списке.<br>
+        2) Загрузись новый файл с объектами для инференса.
+      </p>
+
+      <label for="predictFile">Файл для инференса</label>
+      <input id="predictFile" type="file" />
+
+      <label for="predictRows">Сколько строк в превью</label>
+      <input id="predictRows" type="text" value="30" />
+
+      <button id="predictBtn" onclick="predictOnRun()">Сделать предсказания</button>
+      <div id="predictStatus" style="min-height:18px; margin-top:4px; font-size:11px;"></div>
+      <!-- ▲ Конец блока инференса -->
     </section>
 
-    <!-- центр: отчёт + model card + метрики + здоровье + рекомендации + ML-подсказки + план + графики -->
+    <!-- центр: отчёт + model card + метрики + здоровье + рекомендации + ML-подсказки + план + предсказания + графики -->
     <section class="middle-panel">
       <div class="report-box" id="reportBox">Здесь появится отчёт ✨</div>
 
@@ -347,6 +366,9 @@
       <div class="recs-box" id="mlHints"></div>
 
       <div class="recs-box" id="planBox"></div>
+
+      <!-- Новый блок: результат предсказаний -->
+      <div class="recs-box" id="predictBox"></div>
 
       <div class="plots-row" id="plotsRow"></div>
     </section>
@@ -385,6 +407,10 @@
     const modelCardBox  = document.getElementById('modelCardBox');
     const agentQuestion = document.getElementById('agentQuestion');
     const agentAnswer   = document.getElementById('agentAnswer');
+
+    const predictBox    = document.getElementById('predictBox');
+    const predictStatus = document.getElementById('predictStatus');
+    const predictBtn    = document.getElementById('predictBtn');
 
     let currentRunId = null;
 
@@ -433,6 +459,7 @@
         renderRecommendations(data);
         renderMLHints(data);
         renderExperimentPlan(data);
+        renderPredictResult(null);   // сбросим панель предсказаний
         renderPlots(data);
         loadRuns();
 
@@ -744,6 +771,63 @@
       planBox.innerHTML = html;
     }
 
+    function renderPredictResult(data) {
+      if (!predictBox) return;
+
+      if (!data) {
+        predictBox.innerHTML = '<span style="color:var(--text-muted);">Пока нет предсказаний для этого запуска.</span>';
+        return;
+      }
+
+      const fmt = (v) =>
+        (typeof v === 'number'
+          ? v.toFixed(3)
+          : (v === null || v === undefined ? '—' : String(v)));
+
+      let html = '<h4>Предсказания по новому файлу</h4>';
+      html += `<div style="font-size:12px; margin-bottom:4px;">Всего строк: ${data.n_rows ?? '?'}</div>`;
+
+      // Метрики на новом файле, если есть
+      if (data.metrics) {
+        html += '<div style="font-size:12px; margin-bottom:4px;">Качество на этом файле:</div><ul>';
+        const m = data.metrics;
+        if (m.accuracy  != null) html += `<li><strong>Accuracy</strong>: ${fmt(m.accuracy)}</li>`;
+        if (m.f1_macro  != null) html += `<li><strong>F1-macro</strong>: ${fmt(m.f1_macro)}</li>`;
+        if (m.rmse      != null) html += `<li><strong>RMSE</strong>: ${fmt(m.rmse)}</li>`;
+        if (m.mae       != null) html += `<li><strong>MAE</strong>: ${fmt(m.mae)}</li>`;
+        if (m.r2        != null) html += `<li><strong>R²</strong>: ${fmt(m.r2)}</li>`;
+        html += '</ul>';
+      }
+
+      // Превью строк с колонками + prediction (+ proba)
+      const preview = Array.isArray(data.preview) ? data.preview : [];
+      if (preview.length) {
+        const cols = Object.keys(preview[0]);
+
+        html += '<div style="margin-top:4px; max-height:150px; overflow:auto;">';
+        html += '<table style="width:100%; border-collapse:collapse; font-size:11px;">';
+        html += '<thead><tr>';
+        cols.forEach(c => {
+          html += `<th style="position:sticky; top:0; background:rgba(15,23,42,0.95); text-align:left; padding:3px 4px; border-bottom:1px solid rgba(148,163,184,0.2);">${escapeHtml(c)}</th>`;
+        });
+        html += '</tr></thead><tbody>';
+
+        preview.forEach(row => {
+          html += '<tr>';
+          cols.forEach(c => {
+            html += `<td style="padding:2px 4px; border-bottom:1px solid rgba(148,163,184,0.08);">${escapeHtml(row[c])}</td>`;
+          });
+          html += '</tr>';
+        });
+
+        html += '</tbody></table></div>';
+      } else {
+        html += '<span style="color:var(--text-muted);">Превью пустое.</span>';
+      }
+
+      predictBox.innerHTML = html;
+    }
+
     function renderPlots(data) {
       plotsRow.innerHTML = '';
       if (!data.plots || !Array.isArray(data.plots) || data.plots.length === 0) return;
@@ -759,6 +843,57 @@
         card.appendChild(title);
         plotsRow.appendChild(card);
       });
+    }
+
+    async function predictOnRun() {
+      const fileInput  = document.getElementById('predictFile');
+      const rowsInput  = document.getElementById('predictRows');
+      const file       = fileInput?.files?.[0];
+
+      if (!currentRunId) {
+        predictStatus.innerHTML = '<span class="status-err">Сначала выбери run справа или загрузи датасет.</span>';
+        return;
+      }
+      if (!file) {
+        predictStatus.innerHTML = '<span class="status-err">Выбери файл для инференса.</span>';
+        return;
+      }
+
+      let rows = parseInt((rowsInput?.value || '30'), 10);
+      if (Number.isNaN(rows) || rows <= 0) rows = 30;
+
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('include_proba', 'true');
+      formData.append('return_rows', String(rows));
+
+      if (predictBtn) predictBtn.disabled = true;
+      predictStatus.innerHTML = '<span style="font-size:11px; color:var(--text-muted);">Считаем предсказания...</span>';
+
+      try {
+        const resp = await fetch(`/runs/${encodeURIComponent(currentRunId)}/predict`, {
+          method: 'POST',
+          body: formData,
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          const detail = data.detail || data.error || data;
+          const msg = typeof detail === 'string'
+            ? detail
+            : (detail.details || JSON.stringify(detail));
+          predictStatus.innerHTML = '<span class="status-err">Ошибка: ' + escapeHtml(msg) + '</span>';
+          return;
+        }
+
+        renderPredictResult(data);
+        predictStatus.innerHTML = '<span class="status-ok">Предсказания построены ✅</span>';
+      } catch (e) {
+        console.error(e);
+        predictStatus.innerHTML = '<span class="status-err">Ошибка сети при запросе к /predict.</span>';
+      } finally {
+        if (predictBtn) predictBtn.disabled = false;
+      }
     }
 
     async function loadRuns() {
@@ -801,6 +936,7 @@
         renderRecommendations(data);
         renderMLHints(data);
         renderExperimentPlan(data);
+        renderPredictResult(null);  // сброс для нового run
         renderPlots(data);
 
         Array.from(runsList.children).forEach(ch => {
