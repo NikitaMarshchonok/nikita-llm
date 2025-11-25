@@ -1257,6 +1257,231 @@ def detect_column_roles(df: pd.DataFrame, task: dict | None = None) -> dict:
     return roles
 
 
+def build_data_quality(df: pd.DataFrame, task: dict | None = None) -> dict:
+    """
+    Расширенная диагностика качества данных:
+    - пропуски,
+    - константные и почти константные признаки,
+    - высокая кардинальность категориальных признаков,
+    - высокие корреляции между числовыми фичами,
+    - дисбаланс таргета (для classification).
+
+    Возвращает компактный словарь, удобный для UI и отчётов.
+    """
+    if task is None:
+        task = {}
+
+    n_rows, n_cols = df.shape
+    result: dict = {
+        "n_rows": int(n_rows),
+        "n_cols": int(n_cols),
+        "warnings": [],
+    }
+    warnings: list[str] = []
+
+    # --------------------------
+    # 1) Пропуски
+    # --------------------------
+    missing_summary: dict = {
+        "cols_over_30pct": [],
+        "max_missing_share": 0.0,
+    }
+    if n_rows > 0 and n_cols > 0:
+        missing_fraction = df.isna().mean()
+        if len(missing_fraction) > 0:
+            max_miss = float(missing_fraction.max())
+            missing_summary["max_missing_share"] = max_miss
+
+            high_missing = missing_fraction[missing_fraction > 0.30].sort_values(
+                ascending=False
+            )
+            missing_summary["cols_over_30pct"] = [
+                {"column": col, "share": float(frac)}
+                for col, frac in high_missing.items()
+            ]
+            if not high_missing.empty:
+                cols_short = ", ".join(list(high_missing.index[:5]))
+                warnings.append(
+                    f"Много пропусков (>30%) в колонках: {cols_short}. "
+                    "Нужно либо аккуратный имьютация, либо дроп."
+                )
+
+    result["missing"] = missing_summary
+
+    # --------------------------
+    # 2) Константные / почти константные фичи
+    # --------------------------
+    constant_features: list[str] = []
+    near_constant_features: list[dict] = []
+
+    if n_rows > 0 and n_cols > 0:
+        for col in df.columns:
+            try:
+                vc = df[col].value_counts(dropna=False, normalize=True)
+            except Exception:
+                continue  # на всякий случай, если тип странный (списки, dict и т.п.)
+
+            if vc.empty:
+                continue
+
+            top_share = float(vc.iloc[0])
+            if len(vc) == 1:
+                constant_features.append(col)
+            elif top_share >= 0.98:
+                # почти константа: одно значение занимает >= 98% строк
+                near_constant_features.append(
+                    {
+                        "column": col,
+                        "top_share": top_share,
+                        "top_value": str(vc.index[0]),
+                    }
+                )
+
+    if constant_features:
+        warnings.append(
+            "Константные признаки (их почти всегда можно дропнуть): "
+            + ", ".join(constant_features[:5])
+        )
+    if near_constant_features:
+        warnings.append(
+            "Почти константные признаки (доминирует одно значение): "
+            + ", ".join(n["column"] for n in near_constant_features[:5])
+        )
+
+    result["constant_features"] = constant_features
+    result["near_constant_features"] = near_constant_features
+
+    # --------------------------
+    # 3) Высокая кардинальность категориальных фич
+    # --------------------------
+    high_cardinality: list[dict] = []
+    if n_rows > 0 and n_cols > 0:
+        cat_cols = [
+            c
+            for c in df.columns
+            if str(df[c].dtype) == "object"
+            or str(df[c].dtype).startswith("category")
+        ]
+        for col in cat_cols:
+            try:
+                nunq = int(df[col].nunique(dropna=True))
+            except Exception:
+                continue
+            ratio = nunq / max(1, n_rows)
+            # эвристика: очень много уникальных значений
+            if nunq > 50 and ratio > 0.30:
+                high_cardinality.append(
+                    {
+                        "column": col,
+                        "n_unique": nunq,
+                        "unique_share": float(ratio),
+                    }
+                )
+
+    if high_cardinality:
+        warnings.append(
+            "Высокая кардинальность категориальных признаков: "
+            + ", ".join(h["column"] for h in high_cardinality[:5])
+            + ". Подумай про hashing / target encoding / агрегации."
+        )
+
+    result["high_cardinality_categoricals"] = high_cardinality
+
+    # --------------------------
+    # 4) Сильная корреляция числовых признаков
+    # --------------------------
+    high_corr_pairs: list[dict] = []
+    num_df = df.select_dtypes(include=[np.number])
+
+    if num_df.shape[1] >= 2:
+        corr = num_df.corr().abs()
+        cols = list(corr.columns)
+        threshold = 0.95
+        for i in range(len(cols)):
+            for j in range(i + 1, len(cols)):
+                val = corr.iloc[i, j]
+                if pd.notna(val) and float(val) >= threshold:
+                    high_corr_pairs.append(
+                        {
+                            "col_x": cols[i],
+                            "col_y": cols[j],
+                            "corr": float(val),
+                        }
+                    )
+
+    if high_corr_pairs:
+        short_pairs = ", ".join(
+            f"{p['col_x']} ↔ {p['col_y']}" for p in high_corr_pairs[:3]
+        )
+        warnings.append(
+            "Сильно скоррелированные числовые признаки (|corr| ≥ 0.95): "
+            f"{short_pairs}. Можно убрать дубли / сделать PCA / оставить одну из фич."
+        )
+
+    result["high_correlation_pairs"] = high_corr_pairs
+
+    # --------------------------
+    # 5) Дисбаланс таргета (classification)
+    # --------------------------
+    target_info: dict = {
+        "target": None,
+        "is_imbalanced": False,
+        "majority_class": None,
+        "majority_share": None,
+        "minority_class": None,
+        "minority_share": None,
+        "note": None,
+    }
+
+    target_name = task.get("target")
+    task_type = task.get("task")
+
+    if (
+        n_rows > 0
+        and target_name
+        and task_type == "classification"
+        and target_name in df.columns
+    ):
+        y = df[target_name].dropna()
+        if len(y) > 0:
+            vc = y.value_counts(normalize=True)
+            if len(vc) >= 2:
+                majority_class = vc.index[0]
+                majority_share = float(vc.iloc[0])
+                minority_class = vc.index[-1]
+                minority_share = float(vc.iloc[-1])
+
+                target_info.update(
+                    {
+                        "target": target_name,
+                        "majority_class": str(majority_class),
+                        "majority_share": majority_share,
+                        "minority_class": str(minority_class),
+                        "minority_share": minority_share,
+                    }
+                )
+
+                if majority_share >= 0.8:
+                    target_info["is_imbalanced"] = True
+                    note = (
+                        f"Сильный дисбаланс таргета {target_name}: "
+                        f"majority='{majority_class}' ~ {majority_share:.2f}, "
+                        f"minority='{minority_class}' ~ {minority_share:.2f}. "
+                        "Нужны class_weight / oversampling / подходящая метрика."
+                    )
+                    target_info["note"] = note
+                    warnings.append(note)
+
+    result["target_imbalance"] = target_info
+
+    # --------------------------
+    # Финальный список предупреждений
+    # --------------------------
+    # Оставим не больше 6–7 самых важных, чтобы не перегружать UI
+    result["warnings"] = warnings[:7]
+    return result
+
+
 # ---------------------------------------------------------------------
 # 6.1 оценка здоровья датасета
 # ---------------------------------------------------------------------

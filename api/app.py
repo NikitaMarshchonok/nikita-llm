@@ -34,6 +34,7 @@ from agent.tools import (
     build_experiment_plan,
     auto_model_search,
     suggest_targets,
+    build_data_quality,
     # авто-фиксы + сохранение run'ов
     apply_auto_fixes_for_training,
     apply_auto_fixes_for_inference,
@@ -571,6 +572,10 @@ async def upload_dataset(
         # 5.4) идеи фич
         feature_suggestions = auto_feature_suggestions(df)
 
+        # 5.5) расширенная диагностика качества данных
+        data_quality = build_data_quality(df, task)
+
+
         # === Шаг 1: авто-фиксы под "Сделать сейчас" ===
         df_model, auto_fixes = apply_auto_fixes_for_training(
             df,
@@ -682,6 +687,7 @@ async def upload_dataset(
             "model_columns": list(df_model.columns), # колонки для модели
             "sampling": sampling_info,
             "auto_fixes": auto_fixes,                # метаданные авто-фиксов
+            "data_quality": data_quality,
         }
 
         # 12.1) сохраняем run на диск (JSON + model.joblib)
@@ -715,6 +721,7 @@ async def upload_dataset(
             "target_suggestions",
             "sampling",
             "auto_fixes",
+            "data_quality",
         ]
         payload = {key: run_record.get(key) for key in payload_keys}
         return JSONResponse(content=jsonable_encoder(payload))
