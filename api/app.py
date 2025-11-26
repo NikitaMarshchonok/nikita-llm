@@ -217,7 +217,7 @@ def align_features_for_inference(
         df = df.drop(columns=[target])
     for c in feat_cols:
         if c not in df.columns:
-            df[c] = pd.NA
+            df[c] = np.nan
     return df[feat_cols]
 
 
