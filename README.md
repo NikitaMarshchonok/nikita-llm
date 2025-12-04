@@ -128,9 +128,9 @@ reduce training.max_steps (e.g. 3000 instead of 10000)
 
 ## 7. Next steps (agent plan)
 
-✅ train and get checkpoint
+ train and get checkpoint
 
-🟡 add simple API (FastAPI) around evaluation/generate.py
+ add simple API (FastAPI) around evaluation/generate.py
 
 🟡 add “tools”: load CSV, describe, train simple model
 
