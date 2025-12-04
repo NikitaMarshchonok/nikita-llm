@@ -134,9 +134,9 @@ reduce training.max_steps (e.g. 3000 instead of 10000)
 
  add “tools”: load CSV, describe, train simple model
 
-🟡 build loop: LLM decides → tool runs → LLM 
+ build loop: LLM decides → tool runs → LLM 
 
-🟡 UI (Gradio / React) → “Nikita DS Agent”
+ UI (Gradio / React) → “Nikita DS Agent”
 
 So the final goal: “my own small LLM + agent that helps with data-analysis tasks”
 
