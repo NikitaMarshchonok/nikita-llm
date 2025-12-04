@@ -10,8 +10,8 @@ This repo contains a **fully working pipeline** for training a small GPT-like mo
 
 -  scaffold LLM project locally (no cloud required)
 -  train tokenizer on **own** data
-- ✅ prepare dataset and run training loop
-- ✅ save checkpoints and best model
+-  prepare dataset and run training loop
+-  save checkpoints and best model
 - ✅ run text generation / chat on the trained model
 - 🛠 next: wrap model into API (FastAPI) and build agent on top
 
