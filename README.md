@@ -132,7 +132,7 @@ reduce training.max_steps (e.g. 3000 instead of 10000)
 
  add simple API (FastAPI) around evaluation/generate.py
 
-🟡 add “tools”: load CSV, describe, train simple model
+ add “tools”: load CSV, describe, train simple model
 
 🟡 build loop: LLM decides → tool runs → LLM 
 
