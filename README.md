@@ -12,8 +12,8 @@ This repo contains a **fully working pipeline** for training a small GPT-like mo
 -  train tokenizer on **own** data
 -  prepare dataset and run training loop
 -  save checkpoints and best model
-- ✅ run text generation / chat on the trained model
-- 🛠 next: wrap model into API (FastAPI) and build agent on top
+-  run text generation / chat on the trained model
+-  next: wrap model into API (FastAPI) and build agent on top
 
 ---
 
