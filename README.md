@@ -1,6 +1,4 @@
-# nikita-llm(version1)
-
-Custom LLM training project scaffolded with [`@theanikrtgiri/create-llm`].
+# LLM version
 
 This repo contains a **fully working pipeline** for training a small GPT-like model on local machine (macOS, CPU). The goal of the project is to learn how to **create, train and serve** your own LLM, and then wrap it into an AI agent (for example, a “data scientist agent”).
 
